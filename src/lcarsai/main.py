@@ -1,7 +1,9 @@
 """LCARS desktop shell and first-run local runtime setup."""
 from __future__ import annotations
 
+import atexit
 import os
+import signal
 import sys
 import time
 
@@ -12,9 +14,26 @@ from PySide6.QtWidgets import (
     QMessageBox, QProgressBar, QPushButton, QVBoxLayout, QWidget,
 )
 
-from lcarsai.runtime import check_ollama, models_dir, pull_model, start_managed_runtime
+from lcarsai.runtime import (
+    check_ollama, models_dir, pull_model, start_managed_runtime, stop_managed_runtime,
+)
 
 _managed_process = None
+
+
+def _shutdown_managed_runtime() -> None:
+    """Clean up Ollama and its child runners when Computer exits."""
+    global _managed_process
+    process, _managed_process = _managed_process, None
+    stop_managed_runtime(process)
+
+
+def _handle_termination_signal(signum, _frame) -> None:
+    _shutdown_managed_runtime()
+    raise SystemExit(128 + signum)
+
+
+atexit.register(_shutdown_managed_runtime)
 
 
 class SetupWorker(QThread):
@@ -247,6 +266,9 @@ class ComputerWindow(QMainWindow):
 
 def main() -> int:
     app = QApplication(sys.argv)
+    app.aboutToQuit.connect(_shutdown_managed_runtime)
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(signum, _handle_termination_signal)
     window = ComputerWindow()
     window.show()
     return app.exec()
