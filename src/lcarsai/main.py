@@ -8,7 +8,7 @@ import sys
 import threading
 import time
 
-from PySide6.QtCore import QThread, Qt, QSettings, Signal, QTimer
+from PySide6.QtCore import QThread, Qt, QSettings, Signal, QTimer, QEvent
 from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QMainWindow, QMenu,
@@ -669,6 +669,9 @@ class ComputerWindow(QMainWindow):
         """)
         shell.addWidget(content, 1)
         self.setCentralWidget(root)
+        root.installEventFilter(self)
+        for child in root.findChildren(QWidget):
+            child.installEventFilter(self)
         self.apply_preferences(initial=True)
         self._create_tray()
         self.refresh_runtime_status()
@@ -716,6 +719,21 @@ class ComputerWindow(QMainWindow):
             self.settings.setValue("x", self.x())
             self.settings.setValue("y", self.y())
             self.settings.setValue("positionSaved", True)
+
+    def eventFilter(self, watched, event):
+        # Allow dragging the frameless panel from non-interactive LCARS surfaces.
+        interactive = (QPushButton, QComboBox, QSlider, QCheckBox, QLineEdit, QListWidget)
+        if isinstance(watched, interactive):
+            return super().eventFilter(watched, event)
+        if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            return True
+        if event.type() == QEvent.Type.MouseMove and self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            return True
+        if event.type() == QEvent.Type.MouseButtonRelease:
+            self._drag_offset = None
+        return super().eventFilter(watched, event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
