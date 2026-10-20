@@ -33,8 +33,9 @@ The optional vault encrypts note contents using Fernet with a randomly generated
 
 - Borderless LCARS panel with segmented LCARS-style side rail, status bands, and amber/purple interface palette.
 - Monitor preference and manually moved panel position are remembered.
+- Preferences include interface scaling, installed system speech voice, speech rate/volume, microphone selection, and optional per-user login startup.
 - Tray menu can restore or hide the panel and quit the application.
-- The panel hides seven seconds after speech output completes; restore it from the system tray.
+- The panel hides seven seconds after speech output completes; restore it from the system tray. The wake-word listener rearms after each completed turn.
 
 ## Platform notes
 
@@ -57,8 +58,7 @@ python -m lcarsai.main
 ## Planned / not yet complete
 
 - Voice enrollment and speaker recognition.
-- Animated audio-reactive LCARS visualization and richer per-screen positioning controls.
+- True microphone-level-reactive LCARS visualization.
 - Secure cross-device vault synchronization and a separate recovery workflow UI.
-- Automatic background startup at OS login.
 
 No cloud transcription is enabled. Web lookup occurs only when the user explicitly requests it. The vault is encrypted at rest, but the application has not undergone an independent security audit.
