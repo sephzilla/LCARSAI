@@ -4,7 +4,28 @@ A voice-first, local-first desktop assistant inspired by the LCARS interface fro
 
 ## Project status
 
-This repository is the starting point for the Computer 1.0.0 implementation. The items below are goals, not claims that the features are already implemented.
+**Early development scaffold.** The desktop shell, basic configuration helpers, local Ollama availability check, and starter tests are in the repository. Voice interaction, encrypted storage, model management, and installers are not implemented yet.
+
+## Current development baseline
+
+- Python 3.11+
+- PySide6 desktop shell
+- Checks for an already-running Ollama service at `http://127.0.0.1:11434`
+- Does not download or install inference runtimes automatically
+- Basic configuration for a local per-user data directory
+- GitHub Actions test workflow for Windows and Ubuntu, Python 3.11 and 3.12
+
+### Run from a development checkout
+
+Create and activate a virtual environment, then run:
+
+```bash
+python -m pip install -e ".[dev]"
+python -m pytest -q
+python -m lcarsai.main
+```
+
+On Linux, install your distribution's required Qt system libraries if PySide6 reports missing shared libraries. These commands have not yet been verified on a user's machine; CI is configured but must complete successfully before the baseline can be considered validated.
 
 ## Planned features
 
@@ -30,8 +51,5 @@ The implementation will evaluate a Qt/PySide desktop UI, a local inference runti
 - Do not persist raw enrollment audio by default.
 - Never write to the shared data vault when the filesystem is unavailable or unsafe.
 - Keep Windows and Linux runtime files separate from shared user data.
+- Do not treat a local data directory as encrypted storage; vault encryption remains future work.
 - Document what is implemented, tested, and still experimental.
-
-## Development
-
-See the source tree and project documentation as implementation is added. Do not treat roadmap items as implemented features.
