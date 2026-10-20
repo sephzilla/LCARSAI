@@ -603,6 +603,7 @@ class ComputerWindow(QMainWindow):
             self.detail.setText(f"{selected_model} is installed. Press LISTEN to speak.")
             self.listen_button.setEnabled(True)
             self.activity.setValue(100)
+            QTimer.singleShot(900, self.start_wake_word_listener)
         else:
             self.status.setText("MODEL REQUIRED")
             self.detail.setText("Open LOCAL AI SETUP and download qwen3:8b, or choose a smaller model.")
@@ -657,6 +658,7 @@ class ComputerWindow(QMainWindow):
         self.status.setText("WAKE WORD UNAVAILABLE")
         self.detail.setText(message + " Use LISTEN manually while this is being fixed.")
         self._wake_error_shown = True
+        QTimer.singleShot(5000, self.start_wake_word_listener)
 
     def begin_voice_capture(self, auto_stop=False):
         self.stop_wake_word_listener()
