@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
 )
 
 from lcarsai.runtime import (
-    check_ollama, models_dir, pull_model, start_managed_runtime, stop_managed_runtime,
+    check_ollama, has_model, models_dir, pull_model, start_managed_runtime,
+    stop_managed_runtime,
 )
 
 _managed_process = None
@@ -68,6 +69,12 @@ class SetupWorker(QThread):
                 raise RuntimeError("Ollama did not become ready within 45 seconds.")
             elif self.operation == "model":
                 pull_model(self.model, lambda text: self.progress.emit(text))
+                self.progress.emit("Verifying downloaded model…")
+                if not has_model(self.model, timeout=10.0):
+                    raise RuntimeError(
+                        f"Ollama completed the download but {self.model} was not found "
+                        "in its local model list. Please retry the download."
+                    )
                 self.succeeded.emit(f"Model {self.model} is ready for local use.")
             else:
                 raise RuntimeError("Unknown setup operation.")
@@ -128,6 +135,7 @@ class SetupDialog(QDialog):
         buttons.addWidget(close_button)
         layout.addLayout(buttons)
         self.worker = None
+        self._close_after_success = False
         self.setStyleSheet("""
             QDialog { background: #11131c; color: #f1e7d4; }
             QLabel { color: #f1e7d4; }
@@ -160,6 +168,8 @@ class SetupDialog(QDialog):
     def operation_succeeded(self, message: str) -> None:
         self.status.setText(message)
         self.model_button.setEnabled(check_ollama().available)
+        if self.worker is not None and self.worker.operation == "model":
+            self._close_after_success = True
 
     def operation_failed(self, message: str) -> None:
         self.status.setText(f"Setup failed: {message}")
@@ -169,6 +179,9 @@ class SetupDialog(QDialog):
         self.progress.hide()
         self.runtime_button.setEnabled(True)
         self.model_button.setEnabled(check_ollama().available)
+        if self._close_after_success:
+            self._close_after_success = False
+            self.accept()
 
 
 class ComputerWindow(QMainWindow):
@@ -235,19 +248,38 @@ class ComputerWindow(QMainWindow):
 
     def refresh_runtime_status(self) -> None:
         result = check_ollama()
-        if result.available:
-            self.status.setText("LOCAL RUNTIME AVAILABLE")
-            self.detail.setText(
-                f"Ollama responded at {result.endpoint}"
-                + (f" (version {result.version})." if result.version else ".")
-                + " Use Local AI Setup to download a model."
-            )
-            self.activity.setValue(25)
-        else:
+        if not result.available:
             self.status.setText("LOCAL RUNTIME NOT DETECTED")
             self.detail.setText(
                 f"{result.error or 'Ollama is unavailable.'} Select Local AI Setup to install "
                 "Computer-managed runtime files and start the service."
+            )
+            self.activity.setValue(0)
+            return
+
+        try:
+            ready = has_model("qwen3:8b", timeout=3.0)
+        except RuntimeError as exc:
+            self.status.setText("CHECKING LOCAL MODEL FAILED")
+            self.detail.setText(
+                f"Ollama responds at {result.endpoint}, but Computer could not verify its "
+                f"local model list: {exc} Use Local AI Setup to retry."
+            )
+            self.activity.setValue(0)
+            return
+
+        if ready:
+            self.status.setText("LOCAL AI MODEL READY")
+            self.detail.setText(
+                f"Ollama is responding at {result.endpoint}. The qwen3:8b model is installed "
+                "and ready for local use."
+            )
+            self.activity.setValue(100)
+        else:
+            self.status.setText("LOCAL RUNTIME AVAILABLE — MODEL REQUIRED")
+            self.detail.setText(
+                f"Ollama responds at {result.endpoint}, but qwen3:8b is not installed. "
+                "Select Local AI Setup to download the model."
             )
             self.activity.setValue(0)
 
