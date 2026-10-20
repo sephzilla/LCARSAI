@@ -1,13 +1,12 @@
 """Initial desktop shell for Computer (LCARS AI Assistant).
 
-This is a UI scaffold only: voice capture, inference, encrypted storage, and packaging
-are not implemented in this module yet.
+This is a UI scaffold: microphone capture, speech recognition/synthesis, encrypted
+storage, and packaging are not implemented in this module yet.
 """
 from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -19,6 +18,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from lcarsai.runtime import check_ollama
 
 
 class ComputerWindow(QMainWindow):
@@ -41,14 +42,12 @@ class ComputerWindow(QMainWindow):
         header.setFont(QFont("Sans Serif", 24, QFont.Weight.Bold))
         layout.addWidget(header)
 
-        self.status = QLabel("SYSTEM READY")
+        self.status = QLabel("SYSTEM INITIALIZING")
         self.status.setObjectName("status")
         self.status.setFont(QFont("Sans Serif", 13, QFont.Weight.DemiBold))
         layout.addWidget(self.status)
 
-        self.detail = QLabel(
-            "Voice services are not connected yet. This build is an initial interface scaffold."
-        )
+        self.detail = QLabel("Checking for a local Ollama service…")
         self.detail.setWordWrap(True)
         self.detail.setObjectName("detail")
         layout.addWidget(self.detail)
@@ -77,9 +76,29 @@ class ComputerWindow(QMainWindow):
             """
         )
         self.setCentralWidget(root)
+        self.refresh_runtime_status()
+
+    def refresh_runtime_status(self) -> None:
+        """Show whether the local inference service is reachable."""
+        result = check_ollama()
+        if result.available:
+            self.status.setText("LOCAL RUNTIME AVAILABLE")
+            self.detail.setText(
+                f"Ollama responded at {result.endpoint}"
+                + (f" (version {result.version})." if result.version else ".")
+                + " Model selection and voice services are not wired up yet."
+            )
+            self.activity.setValue(25)
+        else:
+            self.status.setText("LOCAL RUNTIME NOT DETECTED")
+            self.detail.setText(
+                f"{result.error or 'Ollama is unavailable.'} Install and start Ollama separately, "
+                "then restart Computer. This build will not silently download a runtime."
+            )
+            self.activity.setValue(0)
 
     def showEvent(self, event) -> None:  # noqa: N802
-        """Place the window on the configured screen when possible.
+        """Place the window on a configured screen when possible.
 
         Window positioning can be restricted by Wayland compositors; in that case
         the window manager remains in control.
@@ -91,8 +110,7 @@ class ComputerWindow(QMainWindow):
         app = QApplication.instance()
         if app is None:
             return
-        screens = app.screens()
-        target = next((s for s in screens if target_name in s.name().lower()), None)
+        target = next((s for s in app.screens() if target_name in s.name().lower()), None)
         if target is not None:
             self.move(target.availableGeometry().center() - self.rect().center())
 
