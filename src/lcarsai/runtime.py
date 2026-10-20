@@ -66,6 +66,36 @@ def check_ollama(timeout: float = 1.5) -> RuntimeStatus:
         return RuntimeStatus(False, endpoint, error=f"Ollama is not responding ({type(exc).__name__}).")
 
 
+def list_models(timeout: float = 5.0) -> set[str]:
+    """Return locally installed Ollama model names, or raise a useful error."""
+    status = check_ollama(timeout=timeout)
+    if not status.available:
+        raise RuntimeError(status.error or "Ollama is not available.")
+    req = urllib.request.Request(f"{status.endpoint}/api/tags")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        raise RuntimeError(f"Could not check installed Ollama models: {exc}") from exc
+    models = payload.get("models", []) if isinstance(payload, dict) else []
+    return {
+        name
+        for item in models
+        if isinstance(item, dict)
+        for name in (item.get("name"), item.get("model"))
+        if isinstance(name, str) and name
+    }
+
+
+def has_model(model: str, timeout: float = 5.0) -> bool:
+    """Return whether the requested model is present in Ollama's local library."""
+    names = list_models(timeout=timeout)
+    if model in names:
+        return True
+    # Ollama may normalize an untagged model to its :latest name.
+    return ":" not in model and f"{model}:latest" in names
+
+
 def find_ollama() -> Path | None:
     candidates = [shutil.which("ollama"), runtime_dir() / "ollama", runtime_dir() / "bin" / "ollama",
                   runtime_dir() / "ollama.exe", runtime_dir() / "bin" / "ollama.exe"]
