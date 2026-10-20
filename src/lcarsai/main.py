@@ -520,6 +520,7 @@ class ComputerWindow(QMainWindow):
             return
         try:
             selected_model = str(self.settings.value("model", "qwen3:8b"))
+            self.assistant.model = selected_model
             ready = has_model(selected_model, timeout=3)
         except RuntimeError as exc:
             self.status.setText("LOCAL MODEL CHECK FAILED")
