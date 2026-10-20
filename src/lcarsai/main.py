@@ -559,8 +559,10 @@ class ComputerWindow(QMainWindow):
         rail_top = QLabel("LCARS")
         rail_top.setObjectName("railTop")
         rail_top.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._rail_top = rail_top
         rail_top.setFixedSize(112, 64)
         rail.addWidget(rail_top)
+        self._rail_segments = []
         for text, color, height in (
             ("SYSTEM", "#cc79a7", 46), ("VOICE", "#f7a34b", 68),
             ("LOCAL AI", "#ffcc66", 52), ("MEMORY", "#9b8ac4", 58),
@@ -575,6 +577,7 @@ class ComputerWindow(QMainWindow):
                 "font-size:10px; font-weight:900; letter-spacing:1px;"
             )
             rail.addWidget(segment)
+            self._rail_segments.append((segment, height))
         rail.addStretch()
         rail_bottom = QLabel("NCC-1701-D")
         rail_bottom.setObjectName("railBottom")
@@ -590,6 +593,7 @@ class ComputerWindow(QMainWindow):
         top = QHBoxLayout()
         header = QLabel("COMPUTER")
         header.setObjectName("header")
+        self.header = header
         header.setFont(QFont("Sans Serif", 26, QFont.Weight.Black))
         top.addWidget(header)
         subhead = QLabel("PERSONAL OPERATIONS SYSTEM")
@@ -942,6 +946,11 @@ class ComputerWindow(QMainWindow):
             font = app.font()
             font.setPointSizeF(max(8.0, 10.0 * scale))
             app.setFont(font)
+        self.header.setFont(QFont("Sans Serif", round(26 * scale), QFont.Weight.Black))
+        self.wave.setFont(QFont("Sans Serif", round(28 * scale), QFont.Weight.Bold))
+        self._rail_top.setFixedSize(round(112 * scale), round(64 * scale))
+        for segment, height in self._rail_segments:
+            segment.setFixedSize(round(112 * scale), round(height * scale))
         target = self.size()
         if initial or target.width() < 600:
             self.resize(round(980 * scale), round(600 * scale))
