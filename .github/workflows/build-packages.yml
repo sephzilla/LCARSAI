@@ -1,0 +1,111 @@
+name: Build Windows EXE and Linux AppImage
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+  workflow_run:
+    workflows: ["Tests"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pyinstaller
+      - name: Build standalone Windows executable
+        run: |
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name Computer --paths src src/lcarsai/main.py
+      - name: Smoke test executable
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist/Computer.exe")) { throw "Computer.exe was not produced" }
+          if ((Get-Item "dist/Computer.exe").Length -lt 1000000) { throw "Computer.exe looks unexpectedly small" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Computer-Windows-EXE
+          path: dist/Computer.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  build-linux:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y file desktop-file-utils libfuse2
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+          python -m pip install pyinstaller
+      - name: Build standalone Linux application
+        run: |
+          python -m PyInstaller --noconfirm --clean --windowed --name Computer --paths src src/lcarsai/main.py
+      - name: Assemble AppDir
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications AppDir/usr/share/icons/hicolor/256x256/apps
+          cp -a dist/Computer AppDir/usr/bin/
+          cp packaging/computer.desktop AppDir/usr/share/applications/computer.desktop
+          cp packaging/computer.svg AppDir/usr/share/icons/hicolor/256x256/apps/computer.svg
+          cat > AppDir/AppRun <<'EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "$HERE/usr/bin/Computer/Computer" "$@"
+          EOF
+          chmod +x AppDir/AppRun
+          ln -sf usr/share/applications/computer.desktop AppDir/computer.desktop
+          ln -sf usr/share/icons/hicolor/256x256/apps/computer.svg AppDir/computer.svg
+          desktop-file-validate AppDir/usr/share/applications/computer.desktop
+      - name: Download appimagetool
+        run: |
+          curl --fail --location --retry 3             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage             --output appimagetool.AppImage
+          chmod +x appimagetool.AppImage
+      - name: Create AppImage
+        env:
+          ARCH: x86_64
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: ./appimagetool.AppImage AppDir Computer.AppImage
+      - name: Verify package file
+        run: |
+          test -s Computer.AppImage
+          file Computer.AppImage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Computer-Linux-AppImage
+          path: Computer.AppImage
+          if-no-files-found: error
+          retention-days: 30
+
+  package-summary:
+    if: always()
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report result
+        run: |
+          echo "Windows build result: ${{ needs.build-windows.result }}"
+          echo "Linux build result: ${{ needs.build-linux.result }}"
+          test "${{ needs.build-windows.result }}" = "success"
+          test "${{ needs.build-linux.result }}" = "success"
