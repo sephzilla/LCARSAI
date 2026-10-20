@@ -21,7 +21,7 @@ from lcarsai.runtime import (
     pull_model, start_managed_runtime, stop_managed_runtime,
 )
 from lcarsai.assistant import LocalAssistant
-from lcarsai.voice import record_until_stopped, transcribe_local, speak_local, wait_for_wake_word, list_local_voices
+from lcarsai.voice import record_until_stopped, transcribe_local, speak_local, wait_for_wake_word, list_local_voices, list_input_devices
 from lcarsai.startup import set_startup_enabled
 from lcarsai.web_lookup import search_web
 from lcarsai.vault import EncryptedVault
@@ -201,10 +201,11 @@ class VoiceWorker(QThread):
     transcript = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, auto_stop=False):
+    def __init__(self, auto_stop=False, input_device=-1):
         super().__init__()
         self.stop_event = threading.Event()
         self.auto_stop = auto_stop
+        self.input_device = input_device
 
     def stop_recording(self):
         self.stop_event.set()
@@ -212,7 +213,10 @@ class VoiceWorker(QThread):
     def run(self):
         try:
             self.transcript.emit("Listening… speak naturally, then press STOP LISTENING.")
-            audio = record_until_stopped(self.stop_event, auto_stop=self.auto_stop)
+            audio = record_until_stopped(
+                self.stop_event, auto_stop=self.auto_stop,
+                preferred_device=None if self.input_device < 0 else self.input_device,
+            )
             self.transcript.emit("Transcribing locally…")
             text = transcribe_local(audio)
             self.transcript.emit(text)
@@ -224,16 +228,20 @@ class WakeWordWorker(QThread):
     activated = Signal()
     failed = Signal(str)
 
-    def __init__(self):
+    def __init__(self, input_device=-1):
         super().__init__()
         self.stop_event = threading.Event()
+        self.input_device = input_device
 
     def stop_listening(self):
         self.stop_event.set()
 
     def run(self):
         try:
-            wait_for_wake_word(self.stop_event, "computer")
+            wait_for_wake_word(
+                self.stop_event, "computer",
+                None if self.input_device < 0 else self.input_device,
+            )
             if not self.stop_event.is_set():
                 self.activated.emit()
         except Exception as exc:
@@ -411,6 +419,19 @@ class SettingsDialog(QDialog):
             self.monitor.setCurrentIndex(index)
         form.addRow("Panel monitor", self.monitor)
 
+        self.microphone = QComboBox()
+        self.microphone.addItem("System default / automatic fallback", -1)
+        try:
+            for device in list_input_devices():
+                self.microphone.addItem(f'{device["name"]} ({device["hostapi"]})', device["index"])
+        except Exception:
+            pass
+        saved_device = int(self.settings.value("inputDevice", -1))
+        mic_index = self.microphone.findData(saved_device)
+        if mic_index >= 0:
+            self.microphone.setCurrentIndex(mic_index)
+        form.addRow("Microphone input", self.microphone)
+
         self.scale = QSlider(Qt.Orientation.Horizontal)
         self.scale.setRange(70, 150)
         self.scale.setSingleStep(5)
@@ -483,6 +504,7 @@ class SettingsDialog(QDialog):
 
     def save_preferences(self):
         self.settings.setValue("monitor", self.monitor.currentData() or "")
+        self.settings.setValue("inputDevice", int(self.microphone.currentData()))
         self.settings.setValue("uiScale", self.scale.value())
         self.settings.setValue("voiceId", self.voice.currentData() or "")
         self.settings.setValue("voiceRate", self.rate.value())
@@ -764,7 +786,7 @@ class ComputerWindow(QMainWindow):
             return
         if not self.listen_button.isEnabled():
             return
-        self.wake_worker = WakeWordWorker()
+        self.wake_worker = WakeWordWorker(int(self.settings.value("inputDevice", -1)))
         self.wake_worker.activated.connect(self.wake_word_detected)
         self.wake_worker.failed.connect(self.wake_word_failed)
         self.wake_worker.start()
@@ -787,7 +809,9 @@ class ComputerWindow(QMainWindow):
 
     def begin_voice_capture(self, auto_stop=False):
         self.stop_wake_word_listener()
-        self.voice_worker = VoiceWorker(auto_stop=auto_stop)
+        self.voice_worker = VoiceWorker(
+            auto_stop=auto_stop, input_device=int(self.settings.value("inputDevice", -1))
+        )
         self.voice_worker.transcript.connect(self.voice_progress)
         self.voice_worker.failed.connect(self.voice_failed)
         self.voice_worker.finished.connect(self.voice_finished)
@@ -833,6 +857,7 @@ class ComputerWindow(QMainWindow):
         self.listen_button.setText("◉  LISTEN")
         self.wave.setText("◖  ◗  ◖  ◗  ◖  ◗  ◖")
         self.activity.setRange(0, 100)
+        QTimer.singleShot(900, self.start_wake_word_listener)
 
     def responded(self, answer):
         self.conversation.setText("COMPUTER\n" + answer)
@@ -862,6 +887,7 @@ class ComputerWindow(QMainWindow):
         self.activity.setRange(0, 100)
         self.activity.setValue(100)
         QTimer.singleShot(7000, self.hide_after_response)
+        QTimer.singleShot(8000, self.start_wake_word_listener)
 
     def hide_after_response(self):
         if self.isVisible() and not (self.voice_worker and self.voice_worker.isRunning()):
