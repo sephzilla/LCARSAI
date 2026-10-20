@@ -31,6 +31,10 @@ class SetupWorker(QThread):
         global _managed_process
         try:
             if self.operation == "runtime":
+                current = check_ollama(timeout=1.0)
+                if current.available:
+                    self.succeeded.emit(f"Local runtime is already running (Ollama {current.version or 'version unknown'}).")
+                    return
                 self.progress.emit("Preparing Computer's private runtime directory…")
                 _managed_process = start_managed_runtime()
                 for attempt in range(45):
