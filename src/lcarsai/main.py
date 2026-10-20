@@ -857,7 +857,13 @@ class ComputerWindow(QMainWindow):
         self.listen_button.setText("◉  LISTEN")
         self.wave.setText("◖  ◗  ◖  ◗  ◖  ◗  ◖")
         self.activity.setRange(0, 100)
-        QTimer.singleShot(900, self.start_wake_word_listener)
+        QTimer.singleShot(1200, self.restart_wake_word_if_idle)
+
+    def restart_wake_word_if_idle(self):
+        response_busy = self.response_worker is not None and self.response_worker.isRunning()
+        speech_busy = self.speech_worker is not None and self.speech_worker.isRunning()
+        if not response_busy and not speech_busy:
+            self.start_wake_word_listener()
 
     def responded(self, answer):
         self.conversation.setText("COMPUTER\n" + answer)
@@ -879,6 +885,7 @@ class ComputerWindow(QMainWindow):
         self.detail.setText(message)
         self.conversation.setText("I couldn't complete that request. Please try again.")
         self.activity.setRange(0, 100)
+        QTimer.singleShot(1200, self.start_wake_word_listener)
 
     def speech_finished(self):
         self.status.setText("COMPUTER ONLINE")
