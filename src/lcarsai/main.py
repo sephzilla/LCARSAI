@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from lcarsai.runtime import (
-    check_ollama, has_model, models_dir, pull_model, start_managed_runtime,
+    check_ollama, find_ollama, has_model, models_dir, pull_model, start_managed_runtime,
     stop_managed_runtime,
 )
 
@@ -240,6 +240,32 @@ class ComputerWindow(QMainWindow):
         """)
         self.setCentralWidget(root)
         self.refresh_runtime_status()
+        self.start_runtime_on_launch()
+
+    def start_runtime_on_launch(self) -> None:
+        """Start an installed local Ollama runtime automatically, without downloading one."""
+        if check_ollama().available or find_ollama() is None:
+            return
+        self.detail.setText("Starting Computer's local Ollama runtime…")
+        self._startup_worker = SetupWorker("runtime")
+        self._startup_worker.progress.connect(self.detail.setText)
+        self._startup_worker.succeeded.connect(self._runtime_started)
+        self._startup_worker.failed.connect(self._runtime_start_failed)
+        self._startup_worker.finished.connect(self._runtime_start_finished)
+        self._startup_worker.start()
+
+    def _runtime_started(self, message: str) -> None:
+        self.refresh_runtime_status()
+
+    def _runtime_start_failed(self, message: str) -> None:
+        self.status.setText("LOCAL RUNTIME FAILED TO START")
+        self.detail.setText(
+            f"{message} Select Local AI Setup to retry or inspect runtime settings."
+        )
+        self.activity.setValue(0)
+
+    def _runtime_start_finished(self) -> None:
+        self._startup_worker = None
 
     def open_setup(self) -> None:
         dialog = SetupDialog(self)
