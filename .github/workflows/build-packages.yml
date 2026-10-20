@@ -3,8 +3,7 @@ name: Build Windows EXE and Linux AppImage
 on:
   workflow_dispatch:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
   workflow_run:
     workflows: ["Tests"]
     types: [completed]
@@ -28,7 +27,7 @@ jobs:
           python -m pip install pyinstaller
       - name: Build standalone Windows executable
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name Computer --paths src src/lcarsai/main.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --collect-all faster_whisper --collect-all ctranslate2 --collect-all av --collect-all sounddevice --collect-all pyttsx3 --collect-all cryptography --hidden-import sounddevice --hidden-import pyttsx3.drivers.sapi5 --name Computer --paths src src/lcarsai/main.py
       - name: Smoke test executable
         shell: pwsh
         run: |
@@ -52,7 +51,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y file desktop-file-utils libfuse2
+          sudo apt-get install -y file desktop-file-utils libfuse2 libportaudio2 portaudio19-dev espeak-ng
       - name: Install build dependencies
         run: |
           python -m pip install --upgrade pip
@@ -60,7 +59,7 @@ jobs:
           python -m pip install pyinstaller
       - name: Build standalone Linux application
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --hidden-import zstandard --name Computer --paths src src/lcarsai/main.py
+          python -m PyInstaller --noconfirm --clean --windowed --collect-all faster_whisper --collect-all ctranslate2 --collect-all av --collect-all sounddevice --collect-all pyttsx3 --collect-all cryptography --hidden-import sounddevice --hidden-import pyttsx3.drivers.espeak --name Computer --paths src src/lcarsai/main.py
       - name: Assemble AppDir
         shell: bash
         run: |
@@ -80,7 +79,7 @@ jobs:
           desktop-file-validate AppDir/usr/share/applications/computer.desktop
       - name: Download appimagetool
         run: |
-          curl --fail --location --retry 3             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage             --output appimagetool.AppImage
+          curl --fail --location --retry 3 https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage --output appimagetool.AppImage
           chmod +x appimagetool.AppImage
       - name: Create AppImage
         env:

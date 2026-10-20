@@ -1,29 +1,34 @@
-"""LCARS desktop shell and first-run local runtime setup."""
+"""Computer: local, voice-first LCARS desktop assistant."""
 from __future__ import annotations
 
 import atexit
 import os
 import signal
 import sys
+import threading
 import time
 
-from PySide6.QtCore import QThread, Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QThread, Qt, QSettings, Signal, QTimer
+from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QMainWindow,
-    QMessageBox, QProgressBar, QPushButton, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QMainWindow, QMenu,
+    QMessageBox, QProgressBar, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget,
+    QInputDialog, QListWidget, QLineEdit,
 )
 
 from lcarsai.runtime import (
-    check_ollama, find_ollama, has_model, models_dir, pull_model, start_managed_runtime,
-    stop_managed_runtime,
+    app_data_dir, check_ollama, find_ollama, has_model, install_runtime, models_dir,
+    pull_model, start_managed_runtime, stop_managed_runtime,
 )
+from lcarsai.assistant import LocalAssistant
+from lcarsai.voice import record_until_stopped, transcribe_local, speak_local
+from lcarsai.web_lookup import search_web
+from lcarsai.vault import EncryptedVault
 
 _managed_process = None
 
 
 def _shutdown_managed_runtime() -> None:
-    """Clean up Ollama and its child runners when Computer exits."""
     global _managed_process
     process, _managed_process = _managed_process, None
     stop_managed_runtime(process)
@@ -42,177 +47,374 @@ class SetupWorker(QThread):
     succeeded = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, operation: str, model: str = "") -> None:
+    def __init__(self, operation: str, model: str = ""):
         super().__init__()
-        self.operation = operation
-        self.model = model
+        self.operation, self.model = operation, model
 
-    def run(self) -> None:
+    def run(self):
         global _managed_process
         try:
             if self.operation == "runtime":
-                current = check_ollama(timeout=1.0)
-                if current.available:
-                    self.succeeded.emit(f"Local runtime is already running (Ollama {current.version or 'version unknown'}).")
+                if check_ollama(timeout=1).available:
+                    self.succeeded.emit("Ollama is already running.")
                     return
-                self.progress.emit("Preparing Computer's private runtime directory…")
+                self.progress.emit("Installing the official local Ollama runtime…")
+                binary = find_ollama() or install_runtime(lambda done, total: self.progress.emit(
+                    f"Downloading Ollama runtime: {done // 1048576} MB"
+                    + (f" / {total // 1048576} MB" if total else "")
+                ))
+                self.progress.emit("Starting local inference service…")
                 _managed_process = start_managed_runtime()
-                for attempt in range(45):
-                    status = check_ollama(timeout=1.0)
+                for attempt in range(60):
+                    status = check_ollama(timeout=1)
                     if status.available:
-                        self.succeeded.emit(f"Local runtime ready (Ollama {status.version or 'version unknown'}).")
+                        self.succeeded.emit("Local runtime started.")
                         return
                     if _managed_process.poll() is not None:
-                        raise RuntimeError("Ollama exited during startup. Check your system's GPU drivers and runtime libraries.")
-                    self.progress.emit(f"Starting local runtime… ({attempt + 1}/45)")
+                        raise RuntimeError(f"Ollama exited immediately after starting ({binary}).")
+                    self.progress.emit(f"Waiting for Ollama… {attempt + 1}/60")
                     time.sleep(1)
-                raise RuntimeError("Ollama did not become ready within 45 seconds.")
+                raise RuntimeError("Ollama did not become ready within 60 seconds.")
             elif self.operation == "model":
-                pull_model(self.model, lambda text: self.progress.emit(text))
-                self.progress.emit("Verifying downloaded model…")
-                if not has_model(self.model, timeout=10.0):
-                    raise RuntimeError(
-                        f"Ollama completed the download but {self.model} was not found "
-                        "in its local model list. Please retry the download."
-                    )
-                self.succeeded.emit(f"Model {self.model} is ready for local use.")
-            else:
-                raise RuntimeError("Unknown setup operation.")
+                if not check_ollama().available:
+                    _managed_process = start_managed_runtime()
+                    for _ in range(45):
+                        if check_ollama(timeout=1).available:
+                            break
+                        time.sleep(1)
+                    else:
+                        raise RuntimeError("Ollama did not start.")
+                pull_model(self.model, lambda message: self.progress.emit(message))
+                if not has_model(self.model, timeout=10):
+                    raise RuntimeError(f"Model {self.model} could not be verified after download.")
+                self.succeeded.emit(f"Model {self.model} is installed.")
         except Exception as exc:
             self.failed.emit(str(exc))
 
 
 class SetupDialog(QDialog):
-    def __init__(self, parent=None) -> None:
+    ready = Signal()
+
+    def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Computer — Local AI Setup")
-        self.setMinimumWidth(500)
+        self.setMinimumWidth(520)
         layout = QVBoxLayout(self)
         heading = QLabel("LOCAL AI CONFIGURATION")
-        heading.setObjectName("setupHeading")
         heading.setFont(QFont("Sans Serif", 16, QFont.Weight.Bold))
         layout.addWidget(heading)
-
         self.info = QLabel(
-            "Computer runs its language model locally. Setup downloads the official Ollama "
-            "runtime into your user data directory and then downloads a model you choose. "
-            "No administrator privileges or system package changes are required."
+            f"Model storage: {models_dir()}\nRuntime storage: {app_data_dir() / 'runtime' / 'ollama'}\n"
+            "Inference and speech recognition run locally. First-time downloads require internet."
         )
         self.info.setWordWrap(True)
         layout.addWidget(self.info)
-
-        self.location = QLabel(f"Model files: {models_dir()}\nRuntime files: managed by Computer")
-        self.location.setWordWrap(True)
-        layout.addWidget(self.location)
-
-        model_row = QHBoxLayout()
-        model_row.addWidget(QLabel("Local model"))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Model"))
         self.model = QComboBox()
         self.model.addItem("Qwen3 8B — recommended", "qwen3:8b")
-        self.model.addItem("Qwen3 4B — smaller download", "qwen3:4b")
-        self.model.addItem("Qwen3 14B — larger / more memory", "qwen3:14b")
-        model_row.addWidget(self.model, 1)
-        layout.addLayout(model_row)
-
-        self.status = QLabel("Ready to set up.")
+        self.model.addItem("Qwen3 4B — smaller", "qwen3:4b")
+        self.model.addItem("Qwen3 14B — larger", "qwen3:14b")
+        row.addWidget(self.model, 1)
+        layout.addLayout(row)
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Panel monitor"))
+        self.monitor = QComboBox()
+        for screen in QApplication.screens():
+            self.monitor.addItem(screen.name(), screen.name())
+        settings = QSettings("ComputerAI", "Computer")
+        selected = settings.value("monitor", "")
+        index = self.monitor.findData(selected)
+        if index >= 0:
+            self.monitor.setCurrentIndex(index)
+        row.addWidget(self.monitor, 1)
+        layout.addLayout(row)
+        self.status = QLabel("Ready.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
         self.progress = QProgressBar()
-        self.progress.setRange(0, 0)
         self.progress.hide()
         layout.addWidget(self.progress)
-
         buttons = QHBoxLayout()
-        self.runtime_button = QPushButton("Install / Start Runtime")
+        self.runtime_button = QPushButton("Install / Start Ollama")
         self.runtime_button.clicked.connect(lambda: self.run_operation("runtime"))
         buttons.addWidget(self.runtime_button)
         self.model_button = QPushButton("Download Model")
         self.model_button.clicked.connect(lambda: self.run_operation("model"))
-        self.model_button.setEnabled(check_ollama().available)
         buttons.addWidget(self.model_button)
-        close_button = QPushButton("Close")
-        close_button.clicked.connect(self.close)
-        buttons.addWidget(close_button)
+        save = QPushButton("Save Preferences")
+        save.clicked.connect(self.save_preferences)
+        buttons.addWidget(save)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
         layout.addLayout(buttons)
         self.worker = None
-        self._close_after_success = False
         self.setStyleSheet("""
-            QDialog { background: #11131c; color: #f1e7d4; }
-            QLabel { color: #f1e7d4; }
-            QLabel#setupHeading { color: #ffcc66; letter-spacing: 2px; }
-            QPushButton { background: #f7a34b; color: #171522; padding: 9px; border: 0; border-radius: 5px; }
-            QPushButton:disabled { background: #494653; color: #aaa; }
-            QComboBox { padding: 7px; }
-            QProgressBar { min-height: 10px; background: #292b3b; border: 0; }
-            QProgressBar::chunk { background: #cc79a7; }
+            QDialog { background:#11131c; color:#f1e7d4; }
+            QLabel { color:#f1e7d4; }
+            QPushButton { background:#f7a34b; color:#171522; padding:9px; border:0; border-radius:5px; }
+            QPushButton:disabled { background:#494653; color:#aaa; }
+            QComboBox { padding:7px; }
+            QProgressBar { min-height:10px; background:#292b3b; }
+            QProgressBar::chunk { background:#cc79a7; }
         """)
 
-    def run_operation(self, operation: str) -> None:
+    def save_preferences(self):
+        settings = QSettings("ComputerAI", "Computer")
+        settings.setValue("monitor", self.monitor.currentData() or "")
+        self.status.setText("Preferences saved.")
+
+    def run_operation(self, operation):
         if self.worker is not None and self.worker.isRunning():
             return
-        if operation == "model" and not check_ollama().available:
-            QMessageBox.warning(self, "Runtime required", "Install and start the local runtime first.")
-            return
+        self.save_preferences()
         self.runtime_button.setEnabled(False)
         self.model_button.setEnabled(False)
+        self.progress.setRange(0, 0)
         self.progress.show()
-        self.status.setText("Starting…")
-        model = self.model.currentData()
-        self.worker = SetupWorker(operation, model)
+        self.worker = SetupWorker(operation, self.model.currentData())
         self.worker.progress.connect(self.status.setText)
-        self.worker.succeeded.connect(self.operation_succeeded)
-        self.worker.failed.connect(self.operation_failed)
-        self.worker.finished.connect(self.operation_finished)
+        self.worker.succeeded.connect(lambda message: self.operation_succeeded(operation, message))
+        self.worker.failed.connect(self.failed)
+        self.worker.finished.connect(self.finished)
         self.worker.start()
 
-    def operation_succeeded(self, message: str) -> None:
+    def operation_succeeded(self, operation, message):
+        if operation == "model":
+            QSettings("ComputerAI", "Computer").setValue("model", self.model.currentData())
         self.status.setText(message)
-        self.model_button.setEnabled(check_ollama().available)
-        if self.worker is not None and self.worker.operation == "model":
-            self._close_after_success = True
 
-    def operation_failed(self, message: str) -> None:
-        self.status.setText(f"Setup failed: {message}")
+    def failed(self, message):
+        self.status.setText("Setup failed: " + message)
         QMessageBox.warning(self, "Computer setup", message)
 
-    def operation_finished(self) -> None:
+    def finished(self):
         self.progress.hide()
         self.runtime_button.setEnabled(True)
         self.model_button.setEnabled(check_ollama().available)
-        if self._close_after_success:
-            self._close_after_success = False
-            self.accept()
+        self.ready.emit()
+
+
+class VoiceWorker(QThread):
+    transcript = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.stop_event = threading.Event()
+
+    def stop_recording(self):
+        self.stop_event.set()
+
+    def run(self):
+        try:
+            self.transcript.emit("Listening… speak naturally, then press STOP LISTENING.")
+            audio = record_until_stopped(self.stop_event)
+            self.transcript.emit("Transcribing locally…")
+            text = transcribe_local(audio)
+            self.transcript.emit(text)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class ResponseWorker(QThread):
+    response = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, assistant: LocalAssistant, prompt: str):
+        super().__init__()
+        self.assistant, self.prompt = assistant, prompt
+
+    def run(self):
+        try:
+            prompt = self.prompt
+            lower = prompt.lower().strip()
+            trigger = next((phrase for phrase in (
+                "search the web for ", "look up online ", "search online for ",
+                "look that up on the web ",
+            ) if lower.startswith(phrase)), None)
+            if trigger:
+                query = prompt[len(trigger):].strip()
+                results = search_web(query, limit=5)
+                if not results:
+                    prompt = f"The user asked for a web search for {query!r}, but no results were returned. Explain that."
+                else:
+                    material = "\n".join(
+                        f"- {r['title']} — {r['snippet']} ({r['url']})" for r in results
+                    )
+                    prompt = (
+                        f"The user explicitly requested a web search for: {query}\n"
+                        "Summarize these search results cautiously. Mention that results may need verification.\n"
+                        + material
+                    )
+            self.response.emit(self.assistant.respond(prompt))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class SpeechWorker(QThread):
+    failed = Signal(str)
+
+    def __init__(self, text: str):
+        super().__init__()
+        self.text = text
+
+    def run(self):
+        try:
+            speak_local(self.text)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class VaultDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Computer — Encrypted Personal Vault")
+        self.vault = EncryptedVault()
+        layout = QVBoxLayout(self)
+        self.status = QLabel("Notes are encrypted at rest. The vault is optional.")
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        self.items = QListWidget()
+        layout.addWidget(self.items)
+        buttons = QHBoxLayout()
+        for label, fn in (
+            ("Create / Unlock", self.unlock),
+            ("Unlock with Recovery Key", self.unlock_recovery),
+            ("Add Note", self.add_note),
+            ("Delete Selected", self.delete_note),
+            ("Lock", self.lock),
+        ):
+            button = QPushButton(label)
+            button.clicked.connect(fn)
+            buttons.addWidget(button)
+        layout.addLayout(buttons)
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        layout.addWidget(close)
+        self.setStyleSheet("QDialog{background:#11131c;color:#f1e7d4} QLabel{color:#f1e7d4} QPushButton{background:#f7a34b;padding:8px}")
+
+    def unlock(self):
+        if self.vault.exists:
+            secret, ok = QInputDialog.getText(self, "Unlock vault", "Passphrase:", QLineEdit.EchoMode.Password)
+            if not ok:
+                return
+            try:
+                self.vault.unlock(secret)
+            except Exception as exc:
+                QMessageBox.warning(self, "Vault", str(exc))
+                return
+        else:
+            secret, ok = QInputDialog.getText(self, "Create vault", "New passphrase (10+ characters):", QLineEdit.EchoMode.Password)
+            if not ok:
+                return
+            try:
+                recovery = self.vault.create(secret)
+            except Exception as exc:
+                QMessageBox.warning(self, "Vault", str(exc))
+                return
+            QMessageBox.information(
+                self, "Save your recovery key",
+                "Store this recovery key somewhere safe, outside this computer. It is shown only now:\n\n" + recovery
+            )
+        self.refresh()
+
+    def unlock_recovery(self):
+        secret, ok = QInputDialog.getText(self, "Recover vault", "Recovery key:", QLineEdit.EchoMode.Password)
+        if not ok:
+            return
+        try:
+            self.vault.unlock(secret, recovery=True)
+            self.refresh()
+        except Exception as exc:
+            QMessageBox.warning(self, "Vault", str(exc))
+
+    def refresh(self):
+        self.items.clear()
+        for item in self.vault.list_items():
+            self.items.addItem(item["title"] + " — " + item["note"])
+        self.status.setText("Vault unlocked." if self.vault._secret else "Vault locked.")
+
+    def add_note(self):
+        if not self.vault._secret:
+            QMessageBox.information(self, "Vault", "Unlock the vault first.")
+            return
+        title, ok = QInputDialog.getText(self, "New note", "Title:")
+        if not ok:
+            return
+        note, ok = QInputDialog.getMultiLineText(self, "New note", "Note:")
+        if not ok:
+            return
+        try:
+            self.vault.add(title, note)
+            self.refresh()
+        except Exception as exc:
+            QMessageBox.warning(self, "Vault", str(exc))
+
+    def delete_note(self):
+        if not self.vault._secret:
+            return
+        index = self.items.currentRow()
+        if index >= 0:
+            self.vault.delete(index)
+            self.refresh()
+
+    def lock(self):
+        self.vault.lock()
+        self.refresh()
 
 
 class ComputerWindow(QMainWindow):
-    """Minimal LCARS-inspired desktop shell."""
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
         self.setWindowTitle("Computer")
-        self.setMinimumSize(560, 360)
+        self.setMinimumSize(600, 480)
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self.settings = QSettings("ComputerAI", "Computer")
+        self.assistant = LocalAssistant(str(self.settings.value("model", "qwen3:8b")))
+        self.voice_worker = None
+        self.response_worker = None
+        self.speech_worker = None
+        self._drag_offset = None
+        self._hide_after_response = False
 
         root = QWidget()
         root.setObjectName("root")
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(28, 24, 28, 24)
-        layout.setSpacing(14)
-
+        layout.setContentsMargins(28, 22, 28, 22)
+        layout.setSpacing(13)
+        top = QHBoxLayout()
         header = QLabel("COMPUTER")
         header.setObjectName("header")
         header.setFont(QFont("Sans Serif", 24, QFont.Weight.Bold))
-        layout.addWidget(header)
+        top.addWidget(header)
+        top.addStretch()
+        self.close_button = QPushButton("×")
+        self.close_button.setFixedWidth(38)
+        self.close_button.clicked.connect(self.hide)
+        top.addWidget(self.close_button)
+        layout.addLayout(top)
 
         self.status = QLabel("SYSTEM INITIALIZING")
         self.status.setObjectName("status")
         self.status.setFont(QFont("Sans Serif", 13, QFont.Weight.DemiBold))
         layout.addWidget(self.status)
-
-        self.detail = QLabel("Checking local AI runtime…")
-        self.detail.setWordWrap(True)
+        self.detail = QLabel("Preparing local voice interface…")
         self.detail.setObjectName("detail")
+        self.detail.setWordWrap(True)
         layout.addWidget(self.detail)
-
+        self.wave = QLabel("◖  ◗  ◖  ◗  ◖  ◗  ◖")
+        self.wave.setObjectName("wave")
+        self.wave.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.wave.setFont(QFont("Sans Serif", 28, QFont.Weight.Bold))
+        layout.addWidget(self.wave)
+        self.conversation = QLabel("VOICE-ONLY INTERFACE\nPress LISTEN and speak. No cloud transcription.")
+        self.conversation.setObjectName("conversation")
+        self.conversation.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.conversation.setWordWrap(True)
+        self.conversation.setMinimumHeight(110)
+        layout.addWidget(self.conversation)
         self.activity = QProgressBar()
         self.activity.setRange(0, 100)
         self.activity.setValue(0)
@@ -220,110 +422,223 @@ class ComputerWindow(QMainWindow):
         self.activity.setMaximumHeight(12)
         layout.addWidget(self.activity)
 
+        controls = QHBoxLayout()
+        self.listen_button = QPushButton("◉  LISTEN")
+        self.listen_button.clicked.connect(self.toggle_listening)
+        controls.addWidget(self.listen_button, 2)
         self.setup_button = QPushButton("LOCAL AI SETUP")
         self.setup_button.clicked.connect(self.open_setup)
-        layout.addWidget(self.setup_button)
-        layout.addStretch(1)
-        footer = QLabel("LOCAL-FIRST  •  VOICE INTERACTION IN DEVELOPMENT")
+        controls.addWidget(self.setup_button)
+        self.vault_button = QPushButton("PERSONAL VAULT")
+        self.vault_button.clicked.connect(self.open_vault)
+        controls.addWidget(self.vault_button)
+        layout.addLayout(controls)
+        footer = QLabel("LOCAL-FIRST  •  VOICE INPUT • LOCAL MODEL • SYSTEM SPEECH")
         footer.setObjectName("footer")
         layout.addWidget(footer)
 
         root.setStyleSheet("""
-            QWidget#root { background: #11131c; border: 3px solid #f7a34b; border-radius: 18px; }
-            QLabel#header { color: #ffcc66; letter-spacing: 3px; }
-            QLabel#status { color: #f7a34b; }
-            QLabel#detail { color: #f1e7d4; }
-            QLabel#footer { color: #a8a2bd; font-size: 10px; letter-spacing: 1px; }
-            QProgressBar { background: #292b3b; border: 0; border-radius: 5px; }
-            QProgressBar::chunk { background: #cc79a7; border-radius: 5px; }
-            QPushButton { background: #f7a34b; color: #171522; padding: 10px; border: 0; border-radius: 5px; }
+            QWidget#root { background:#11131c; border:3px solid #f7a34b; border-radius:18px; }
+            QLabel#header { color:#ffcc66; letter-spacing:3px; }
+            QLabel#status { color:#f7a34b; }
+            QLabel#detail { color:#f1e7d4; }
+            QLabel#wave { color:#cc79a7; padding:12px; }
+            QLabel#conversation { color:#f1e7d4; background:#202231; border:1px solid #55445d; border-radius:10px; padding:15px; }
+            QLabel#footer { color:#a8a2bd; font-size:10px; letter-spacing:1px; }
+            QPushButton { background:#f7a34b; color:#171522; padding:10px; border:0; border-radius:5px; font-weight:bold; }
+            QPushButton:disabled { background:#494653; color:#aaa; }
+            QProgressBar { background:#292b3b; border:0; border-radius:5px; }
+            QProgressBar::chunk { background:#cc79a7; border-radius:5px; }
         """)
         self.setCentralWidget(root)
+        self._create_tray()
         self.refresh_runtime_status()
         self.start_runtime_on_launch()
+        QTimer.singleShot(1200, self.position_on_selected_screen)
 
-    def start_runtime_on_launch(self) -> None:
-        """Start an installed local Ollama runtime automatically, without downloading one."""
-        if check_ollama().available or find_ollama() is None:
-            return
-        self.detail.setText("Starting Computer's local Ollama runtime…")
-        self._startup_worker = SetupWorker("runtime")
-        self._startup_worker.progress.connect(self.detail.setText)
-        self._startup_worker.succeeded.connect(self._runtime_started)
-        self._startup_worker.failed.connect(self._runtime_start_failed)
-        self._startup_worker.finished.connect(self._runtime_start_finished)
-        self._startup_worker.start()
+    def _create_tray(self):
+        self.tray = QSystemTrayIcon(self)
+        self.tray.setToolTip("Computer — local voice assistant")
+        menu = QMenu()
+        show_action = QAction("Show Computer", self)
+        show_action.triggered.connect(self.show_and_raise)
+        menu.addAction(show_action)
+        hide_action = QAction("Hide Computer", self)
+        hide_action.triggered.connect(self.hide)
+        menu.addAction(hide_action)
+        menu.addSeparator()
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(QApplication.instance().quit)
+        menu.addAction(quit_action)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(lambda reason: self.show_and_raise() if reason == QSystemTrayIcon.ActivationReason.Trigger else None)
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray.show()
 
-    def _runtime_started(self, message: str) -> None:
-        self.refresh_runtime_status()
+    def show_and_raise(self):
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
-    def _runtime_start_failed(self, message: str) -> None:
-        self.status.setText("LOCAL RUNTIME FAILED TO START")
-        self.detail.setText(
-            f"{message} Select Local AI Setup to retry or inspect runtime settings."
-        )
-        self.activity.setValue(0)
+    def position_on_selected_screen(self):
+        name = str(self.settings.value("monitor", "") or "")
+        screen = next((s for s in QApplication.screens() if s.name() == name), None)
+        if screen is None:
+            screen = QApplication.primaryScreen()
+        if self.settings.value("positionSaved", False):
+            self.move(int(self.settings.value("x", 100)), int(self.settings.value("y", 100)))
+        elif screen:
+            self.move(screen.availableGeometry().center() - self.rect().center())
 
-    def _runtime_start_finished(self) -> None:
-        self._startup_worker = None
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if self.isVisible():
+            self.settings.setValue("x", self.x())
+            self.settings.setValue("y", self.y())
+            self.settings.setValue("positionSaved", True)
 
-    def open_setup(self) -> None:
-        dialog = SetupDialog(self)
-        dialog.exec()
-        self.refresh_runtime_status()
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
 
-    def refresh_runtime_status(self) -> None:
+    def mouseMoveEvent(self, event):
+        if self._drag_offset is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_offset)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_offset = None
+
+    def refresh_runtime_status(self):
         result = check_ollama()
         if not result.available:
             self.status.setText("LOCAL RUNTIME NOT DETECTED")
-            self.detail.setText(
-                f"{result.error or 'Ollama is unavailable.'} Select Local AI Setup to install "
-                "Computer-managed runtime files and start the service."
-            )
+            self.detail.setText("Open LOCAL AI SETUP to install or start Ollama.")
+            self.listen_button.setEnabled(False)
             self.activity.setValue(0)
             return
-
         try:
-            ready = has_model("qwen3:8b", timeout=3.0)
+            selected_model = str(self.settings.value("model", "qwen3:8b"))
+            ready = has_model(selected_model, timeout=3)
         except RuntimeError as exc:
-            self.status.setText("CHECKING LOCAL MODEL FAILED")
-            self.detail.setText(
-                f"Ollama responds at {result.endpoint}, but Computer could not verify its "
-                f"local model list: {exc} Use Local AI Setup to retry."
-            )
-            self.activity.setValue(0)
+            self.status.setText("LOCAL MODEL CHECK FAILED")
+            self.detail.setText(str(exc))
+            self.listen_button.setEnabled(False)
             return
-
         if ready:
-            self.status.setText("LOCAL AI MODEL READY")
-            self.detail.setText(
-                f"Ollama is responding at {result.endpoint}. The qwen3:8b model is installed "
-                "and ready for local use."
-            )
+            self.status.setText("COMPUTER ONLINE")
+            self.detail.setText(f"{selected_model} is installed. Press LISTEN to speak.")
+            self.listen_button.setEnabled(True)
             self.activity.setValue(100)
         else:
-            self.status.setText("LOCAL RUNTIME AVAILABLE — MODEL REQUIRED")
-            self.detail.setText(
-                f"Ollama responds at {result.endpoint}, but qwen3:8b is not installed. "
-                "Select Local AI Setup to download the model."
-            )
+            self.status.setText("MODEL REQUIRED")
+            self.detail.setText("Open LOCAL AI SETUP and download qwen3:8b, or choose a smaller model.")
+            self.listen_button.setEnabled(False)
             self.activity.setValue(0)
 
-    def showEvent(self, event) -> None:  # noqa: N802
-        super().showEvent(event)
-        target_name = os.environ.get("LCARSAI_SCREEN", "").strip().lower()
-        if not target_name:
+    def start_runtime_on_launch(self):
+        if check_ollama().available or find_ollama() is None:
             return
-        app = QApplication.instance()
-        if app is None:
+        self.status.setText("STARTING LOCAL RUNTIME")
+        self.detail.setText("Starting Computer's managed Ollama runtime…")
+        self._startup_worker = SetupWorker("runtime")
+        self._startup_worker.progress.connect(self.detail.setText)
+        self._startup_worker.succeeded.connect(lambda _: self.refresh_runtime_status())
+        self._startup_worker.failed.connect(lambda msg: self.runtime_failed(msg))
+        self._startup_worker.start()
+
+    def runtime_failed(self, message):
+        self.status.setText("LOCAL RUNTIME FAILED")
+        self.detail.setText(message + " Open LOCAL AI SETUP to retry.")
+
+    def toggle_listening(self):
+        if self.voice_worker is not None and self.voice_worker.isRunning():
+            self.voice_worker.stop_recording()
+            self.listen_button.setEnabled(False)
+            self.detail.setText("Finishing recording…")
             return
-        target = next((s for s in app.screens() if target_name in s.name().lower()), None)
-        if target is not None:
-            self.move(target.availableGeometry().center() - self.rect().center())
+        self.voice_worker = VoiceWorker()
+        self.voice_worker.transcript.connect(self.voice_progress)
+        self.voice_worker.failed.connect(self.voice_failed)
+        self.voice_worker.finished.connect(self.voice_finished)
+        self.listen_button.setText("■  STOP LISTENING")
+        self.status.setText("LISTENING")
+        self.wave.setText("◖  ◖ ◗ ◖ ◗ ◖  ◗")
+        self.activity.setRange(0, 0)
+        self.voice_worker.start()
+
+    def voice_progress(self, text):
+        if text.startswith("Listening"):
+            self.detail.setText("Microphone active. Press STOP LISTENING when you finish.")
+            return
+        if text == "Transcribing locally…":
+            self.status.setText("PROCESSING SPEECH")
+            self.detail.setText(text)
+            return
+        self.conversation.setText("YOU SAID\n" + text)
+        self.detail.setText("Generating a local response…")
+        self.status.setText("COMPUTING")
+        self.activity.setRange(0, 0)
+        self.response_worker = ResponseWorker(self.assistant, text)
+        self.response_worker.response.connect(self.responded)
+        self.response_worker.failed.connect(self.response_failed)
+        self.response_worker.start()
+
+    def voice_failed(self, message):
+        self.status.setText("VOICE INPUT UNAVAILABLE")
+        self.detail.setText(message)
+        self.conversation.setText("Press LISTEN to try again.")
+        self.activity.setRange(0, 100)
+
+    def voice_finished(self):
+        self.listen_button.setEnabled(True)
+        self.listen_button.setText("◉  LISTEN")
+        self.wave.setText("◖  ◗  ◖  ◗  ◖  ◗  ◖")
+        self.activity.setRange(0, 100)
+
+    def responded(self, answer):
+        self.conversation.setText("COMPUTER\n" + answer)
+        self.status.setText("SPEAKING")
+        self.detail.setText("Response generated locally.")
+        self.activity.setValue(100)
+        self.speech_worker = SpeechWorker(answer)
+        self.speech_worker.failed.connect(lambda msg: self.detail.setText(msg))
+        self.speech_worker.finished.connect(self.speech_finished)
+        self.speech_worker.start()
+
+    def response_failed(self, message):
+        self.status.setText("RESPONSE FAILED")
+        self.detail.setText(message)
+        self.conversation.setText("I couldn't complete that request. Please try again.")
+        self.activity.setRange(0, 100)
+
+    def speech_finished(self):
+        self.status.setText("COMPUTER ONLINE")
+        self.detail.setText("Ready for your next request.")
+        self.listen_button.setEnabled(True)
+        self.activity.setRange(0, 100)
+        self.activity.setValue(100)
+        QTimer.singleShot(7000, self.hide_after_response)
+
+    def hide_after_response(self):
+        if self.isVisible() and not (self.voice_worker and self.voice_worker.isRunning()):
+            self.hide()
+
+    def open_setup(self):
+        dialog = SetupDialog(self)
+        dialog.ready.connect(self.refresh_runtime_status)
+        dialog.exec()
+        self.refresh_runtime_status()
+
+    def open_vault(self):
+        dialog = VaultDialog(self)
+        dialog.exec()
 
 
 def main() -> int:
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     app.aboutToQuit.connect(_shutdown_managed_runtime)
     for signum in (signal.SIGINT, signal.SIGTERM):
         signal.signal(signum, _handle_termination_signal)
