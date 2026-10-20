@@ -21,7 +21,7 @@ from lcarsai.runtime import (
     pull_model, start_managed_runtime, stop_managed_runtime,
 )
 from lcarsai.assistant import LocalAssistant
-from lcarsai.voice import record_until_stopped, transcribe_local, speak_local
+from lcarsai.voice import record_until_stopped, transcribe_local, speak_local, wait_for_wake_word
 from lcarsai.web_lookup import search_web
 from lcarsai.vault import EncryptedVault
 
@@ -200,9 +200,10 @@ class VoiceWorker(QThread):
     transcript = Signal(str)
     failed = Signal(str)
 
-    def __init__(self):
+    def __init__(self, auto_stop=False):
         super().__init__()
         self.stop_event = threading.Event()
+        self.auto_stop = auto_stop
 
     def stop_recording(self):
         self.stop_event.set()
@@ -210,12 +211,33 @@ class VoiceWorker(QThread):
     def run(self):
         try:
             self.transcript.emit("Listening… speak naturally, then press STOP LISTENING.")
-            audio = record_until_stopped(self.stop_event)
+            audio = record_until_stopped(self.stop_event, auto_stop=self.auto_stop)
             self.transcript.emit("Transcribing locally…")
             text = transcribe_local(audio)
             self.transcript.emit(text)
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class WakeWordWorker(QThread):
+    activated = Signal()
+    failed = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.stop_event = threading.Event()
+
+    def stop_listening(self):
+        self.stop_event.set()
+
+    def run(self):
+        try:
+            wait_for_wake_word(self.stop_event, "computer")
+            if not self.stop_event.is_set():
+                self.activated.emit()
+        except Exception as exc:
+            if not self.stop_event.is_set():
+                self.failed.emit(str(exc))
 
 
 class ResponseWorker(QThread):
@@ -374,27 +396,70 @@ class ComputerWindow(QMainWindow):
         self.settings = QSettings("ComputerAI", "Computer")
         self.assistant = LocalAssistant(str(self.settings.value("model", "qwen3:8b")))
         self.voice_worker = None
+        self.wake_worker = None
         self.response_worker = None
         self.speech_worker = None
+        self._wake_error_shown = False
         self._drag_offset = None
         self._hide_after_response = False
 
         root = QWidget()
         root.setObjectName("root")
-        layout = QVBoxLayout(root)
-        layout.setContentsMargins(28, 22, 28, 22)
-        layout.setSpacing(13)
+        shell = QHBoxLayout(root)
+        shell.setContentsMargins(12, 12, 12, 12)
+        shell.setSpacing(12)
+
+        rail = QVBoxLayout()
+        rail.setSpacing(7)
+        rail_top = QLabel("LCARS")
+        rail_top.setObjectName("railTop")
+        rail_top.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        rail_top.setFixedSize(112, 64)
+        rail.addWidget(rail_top)
+        for text, color, height in (
+            ("SYSTEM", "#cc79a7", 46), ("VOICE", "#f7a34b", 68),
+            ("LOCAL AI", "#ffcc66", 52), ("MEMORY", "#9b8ac4", 58),
+            ("STATUS", "#cc79a7", 44),
+        ):
+            segment = QLabel(text)
+            segment.setObjectName("railSegment")
+            segment.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            segment.setFixedSize(112, height)
+            segment.setStyleSheet(
+                f"background:{color}; color:#171522; border-radius:17px; "
+                "font-size:10px; font-weight:900; letter-spacing:1px;"
+            )
+            rail.addWidget(segment)
+        rail.addStretch()
+        rail_bottom = QLabel("NCC-1701-D")
+        rail_bottom.setObjectName("railBottom")
+        rail_bottom.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        rail.addWidget(rail_bottom)
+        shell.addLayout(rail)
+
+        content = QWidget()
+        content.setObjectName("content")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(6, 4, 6, 4)
+        layout.setSpacing(10)
         top = QHBoxLayout()
         header = QLabel("COMPUTER")
         header.setObjectName("header")
-        header.setFont(QFont("Sans Serif", 24, QFont.Weight.Bold))
+        header.setFont(QFont("Sans Serif", 26, QFont.Weight.Black))
         top.addWidget(header)
+        subhead = QLabel("PERSONAL OPERATIONS SYSTEM")
+        subhead.setObjectName("subhead")
+        top.addWidget(subhead)
         top.addStretch()
         self.close_button = QPushButton("×")
         self.close_button.setFixedWidth(38)
         self.close_button.clicked.connect(self.hide)
         top.addWidget(self.close_button)
         layout.addLayout(top)
+        divider = QWidget()
+        divider.setFixedHeight(7)
+        divider.setStyleSheet("background:#f7a34b; border-radius:3px;")
+        layout.addWidget(divider)
 
         self.status = QLabel("SYSTEM INITIALIZING")
         self.status.setObjectName("status")
@@ -438,23 +503,29 @@ class ComputerWindow(QMainWindow):
         layout.addWidget(footer)
 
         root.setStyleSheet("""
-            QWidget#root { background:#11131c; border:3px solid #f7a34b; border-radius:18px; }
-            QLabel#header { color:#ffcc66; letter-spacing:3px; }
-            QLabel#status { color:#f7a34b; }
-            QLabel#detail { color:#f1e7d4; }
-            QLabel#wave { color:#cc79a7; padding:12px; }
-            QLabel#conversation { color:#f1e7d4; background:#202231; border:1px solid #55445d; border-radius:10px; padding:15px; }
-            QLabel#footer { color:#a8a2bd; font-size:10px; letter-spacing:1px; }
-            QPushButton { background:#f7a34b; color:#171522; padding:10px; border:0; border-radius:5px; font-weight:bold; }
+            QWidget#root { background:#080b18; border:0; }
+            QWidget#content { background:#111626; border:0; }
+            QLabel#railTop { background:#f7a34b; color:#111626; border-radius:28px 8px 8px 8px; font-size:17px; font-weight:900; letter-spacing:2px; }
+            QLabel#railBottom { color:#9b8ac4; font-size:9px; font-weight:bold; }
+            QLabel#header { color:#ffcc66; letter-spacing:4px; }
+            QLabel#subhead { color:#9b8ac4; font-size:9px; letter-spacing:1px; padding-left:12px; }
+            QLabel#status { color:#f7a34b; background:#20253a; border-left:8px solid #cc79a7; padding:9px 12px; font-size:13px; letter-spacing:1px; }
+            QLabel#detail { color:#f1e7d4; padding:2px 8px; }
+            QLabel#wave { color:#cc79a7; background:#20253a; padding:10px; border-radius:20px; }
+            QLabel#conversation { color:#f1e7d4; background:#171d30; border:2px solid #6d6489; border-radius:18px; padding:15px; }
+            QLabel#footer { color:#9b8ac4; font-size:9px; letter-spacing:1px; }
+            QPushButton { background:#f7a34b; color:#171522; padding:10px; border:0; border-radius:15px 5px 15px 5px; font-weight:900; }
             QPushButton:disabled { background:#494653; color:#aaa; }
             QProgressBar { background:#292b3b; border:0; border-radius:5px; }
             QProgressBar::chunk { background:#cc79a7; border-radius:5px; }
         """)
+        shell.addWidget(content, 1)
         self.setCentralWidget(root)
         self._create_tray()
         self.refresh_runtime_status()
         self.start_runtime_on_launch()
         QTimer.singleShot(1200, self.position_on_selected_screen)
+        QTimer.singleShot(2500, self.start_wake_word_listener)
 
     def _create_tray(self):
         self.tray = QSystemTrayIcon(self)
@@ -553,13 +624,43 @@ class ComputerWindow(QMainWindow):
         self.status.setText("LOCAL RUNTIME FAILED")
         self.detail.setText(message + " Open LOCAL AI SETUP to retry.")
 
-    def toggle_listening(self):
+    def stop_wake_word_listener(self):
+        worker = self.wake_worker
+        self.wake_worker = None
+        if worker is not None and worker.isRunning():
+            worker.stop_listening()
+            worker.wait(1200)
+
+    def start_wake_word_listener(self):
         if self.voice_worker is not None and self.voice_worker.isRunning():
-            self.voice_worker.stop_recording()
-            self.listen_button.setEnabled(False)
-            self.detail.setText("Finishing recording…")
             return
-        self.voice_worker = VoiceWorker()
+        if self.wake_worker is not None and self.wake_worker.isRunning():
+            return
+        if not self.listen_button.isEnabled():
+            return
+        self.wake_worker = WakeWordWorker()
+        self.wake_worker.activated.connect(self.wake_word_detected)
+        self.wake_worker.failed.connect(self.wake_word_failed)
+        self.wake_worker.start()
+        self.status.setText("WAKE WORD ARMED")
+        self.detail.setText('Say “Computer” followed by your request. Wake detection runs locally.')
+
+    def wake_word_detected(self):
+        self.wake_worker = None
+        self.show_and_raise()
+        self.status.setText("COMPUTER HEARD YOU")
+        self.conversation.setText("LISTENING FOR YOUR REQUEST…")
+        self.begin_voice_capture(auto_stop=True)
+
+    def wake_word_failed(self, message):
+        self.wake_worker = None
+        self.status.setText("WAKE WORD UNAVAILABLE")
+        self.detail.setText(message + " Use LISTEN manually while this is being fixed.")
+        self._wake_error_shown = True
+
+    def begin_voice_capture(self, auto_stop=False):
+        self.stop_wake_word_listener()
+        self.voice_worker = VoiceWorker(auto_stop=auto_stop)
         self.voice_worker.transcript.connect(self.voice_progress)
         self.voice_worker.failed.connect(self.voice_failed)
         self.voice_worker.finished.connect(self.voice_finished)
@@ -568,6 +669,14 @@ class ComputerWindow(QMainWindow):
         self.wave.setText("◖  ◖ ◗ ◖ ◗ ◖  ◗")
         self.activity.setRange(0, 0)
         self.voice_worker.start()
+
+    def toggle_listening(self):
+        if self.voice_worker is not None and self.voice_worker.isRunning():
+            self.voice_worker.stop_recording()
+            self.listen_button.setEnabled(False)
+            self.detail.setText("Finishing recording…")
+            return
+        self.begin_voice_capture(auto_stop=False)
 
     def voice_progress(self, text):
         if text.startswith("Listening"):
