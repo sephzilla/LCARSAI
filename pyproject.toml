@@ -7,7 +7,7 @@ name = "lcarsai"
 version = "0.1.0"
 description = "Local-first, voice-first LCARS-inspired desktop assistant"
 requires-python = ">=3.11"
-dependencies = ["PySide6>=6.7", "zstandard>=0.22"]
+dependencies = ["PySide6>=6.7", "zstandard>=0.22", "truststore>=0.10"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.6"]
