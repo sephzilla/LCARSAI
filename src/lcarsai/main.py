@@ -13,7 +13,7 @@ from PySide6.QtGui import QAction, QFont
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QMainWindow, QMenu,
     QMessageBox, QProgressBar, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget,
-    QInputDialog, QListWidget, QLineEdit,
+    QInputDialog, QListWidget, QLineEdit, QSlider, QCheckBox, QFormLayout,
 )
 
 from lcarsai.runtime import (
@@ -21,7 +21,8 @@ from lcarsai.runtime import (
     pull_model, start_managed_runtime, stop_managed_runtime,
 )
 from lcarsai.assistant import LocalAssistant
-from lcarsai.voice import record_until_stopped, transcribe_local, speak_local, wait_for_wake_word
+from lcarsai.voice import record_until_stopped, transcribe_local, speak_local, wait_for_wake_word, list_local_voices
+from lcarsai.startup import set_startup_enabled
 from lcarsai.web_lookup import search_web
 from lcarsai.vault import EncryptedVault
 
@@ -278,13 +279,14 @@ class ResponseWorker(QThread):
 class SpeechWorker(QThread):
     failed = Signal(str)
 
-    def __init__(self, text: str):
+    def __init__(self, text: str, voice_id: str = "", rate: int = 178, volume: float = 1.0):
         super().__init__()
         self.text = text
+        self.voice_id, self.rate, self.volume = voice_id, rate, volume
 
     def run(self):
         try:
-            speak_local(self.text)
+            speak_local(self.text, self.voice_id, self.rate, self.volume)
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -387,6 +389,124 @@ class VaultDialog(QDialog):
         self.refresh()
 
 
+class SettingsDialog(QDialog):
+    saved = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Computer — Preferences")
+        self.setMinimumWidth(540)
+        self.settings = QSettings("ComputerAI", "Computer")
+        root = QVBoxLayout(self)
+        title = QLabel("COMPUTER SYSTEM PREFERENCES")
+        title.setFont(QFont("Sans Serif", 16, QFont.Weight.Bold))
+        root.addWidget(title)
+        form = QFormLayout()
+        self.monitor = QComboBox()
+        for screen in QApplication.screens():
+            self.monitor.addItem(f"{screen.name()} — {screen.geometry().width()}×{screen.geometry().height()}", screen.name())
+        saved_monitor = str(self.settings.value("monitor", "") or "")
+        index = self.monitor.findData(saved_monitor)
+        if index >= 0:
+            self.monitor.setCurrentIndex(index)
+        form.addRow("Panel monitor", self.monitor)
+
+        self.scale = QSlider(Qt.Orientation.Horizontal)
+        self.scale.setRange(70, 150)
+        self.scale.setSingleStep(5)
+        self.scale.setValue(int(self.settings.value("uiScale", 100)))
+        self.scale_label = QLabel(f"{self.scale.value()}%")
+        self.scale.valueChanged.connect(lambda value: self.scale_label.setText(f"{value}%"))
+        scale_row = QHBoxLayout()
+        scale_row.addWidget(self.scale, 1)
+        scale_row.addWidget(self.scale_label)
+        form.addRow("Interface scale / size", scale_row)
+
+        self.voice = QComboBox()
+        voices = list_local_voices()
+        self.voice.addItem("System default", "")
+        for item in voices:
+            self.voice.addItem(item["name"], item["id"])
+        saved_voice = str(self.settings.value("voiceId", "") or "")
+        voice_index = self.voice.findData(saved_voice)
+        if voice_index >= 0:
+            self.voice.setCurrentIndex(voice_index)
+        form.addRow("Speech voice", self.voice)
+
+        self.rate = QSlider(Qt.Orientation.Horizontal)
+        self.rate.setRange(120, 240)
+        self.rate.setSingleStep(5)
+        self.rate.setValue(int(self.settings.value("voiceRate", 178)))
+        self.rate_label = QLabel(f"{self.rate.value()} wpm-ish")
+        self.rate.valueChanged.connect(lambda value: self.rate_label.setText(f"{value}"))
+        rate_row = QHBoxLayout()
+        rate_row.addWidget(self.rate, 1)
+        rate_row.addWidget(self.rate_label)
+        form.addRow("Speech rate", rate_row)
+
+        self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setRange(0, 100)
+        self.volume.setValue(int(float(self.settings.value("voiceVolume", 1.0)) * 100))
+        self.volume_label = QLabel(f"{self.volume.value()}%")
+        self.volume.valueChanged.connect(lambda value: self.volume_label.setText(f"{value}%"))
+        volume_row = QHBoxLayout()
+        volume_row.addWidget(self.volume, 1)
+        volume_row.addWidget(self.volume_label)
+        form.addRow("Speech volume", volume_row)
+
+        self.autostart = QCheckBox("Start Computer automatically when I log in")
+        self.autostart.setChecked(str(self.settings.value("autoStart", "false")).lower() in ("true", "1", "yes"))
+        form.addRow("Startup", self.autostart)
+        root.addLayout(form)
+        self.note = QLabel("Voice choices depend on speech voices installed in your operating system.")
+        self.note.setWordWrap(True)
+        root.addWidget(self.note)
+        buttons = QHBoxLayout()
+        save = QPushButton("SAVE PREFERENCES")
+        save.clicked.connect(self.save_preferences)
+        buttons.addWidget(save)
+        test = QPushButton("TEST VOICE")
+        test.clicked.connect(self.test_voice)
+        buttons.addWidget(test)
+        close = QPushButton("CLOSE")
+        close.clicked.connect(self.accept)
+        buttons.addWidget(close)
+        root.addLayout(buttons)
+        self.setStyleSheet("""
+            QDialog { background:#11131c; color:#f1e7d4; }
+            QLabel { color:#f1e7d4; }
+            QPushButton { background:#f7a34b; color:#171522; padding:9px; border:0; border-radius:5px; }
+            QComboBox { padding:7px; }
+            QSlider::groove:horizontal { height:6px; background:#494653; }
+            QSlider::handle:horizontal { background:#cc79a7; width:16px; margin:-6px 0; border-radius:8px; }
+        """)
+
+    def save_preferences(self):
+        self.settings.setValue("monitor", self.monitor.currentData() or "")
+        self.settings.setValue("uiScale", self.scale.value())
+        self.settings.setValue("voiceId", self.voice.currentData() or "")
+        self.settings.setValue("voiceRate", self.rate.value())
+        self.settings.setValue("voiceVolume", self.volume.value() / 100.0)
+        self.settings.setValue("autoStart", self.autostart.isChecked())
+        try:
+            set_startup_enabled(self.autostart.isChecked())
+            self.note.setText("Preferences saved.")
+        except Exception as exc:
+            self.note.setText(f"Preferences saved, but login startup could not be changed: {exc}")
+        self.saved.emit()
+
+    def test_voice(self):
+        try:
+            speak_local(
+                "Computer voice systems are operational.",
+                str(self.voice.currentData() or ""),
+                self.rate.value(),
+                self.volume.value() / 100.0,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Voice test", str(exc))
+
+
 class ComputerWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -395,6 +515,7 @@ class ComputerWindow(QMainWindow):
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.settings = QSettings("ComputerAI", "Computer")
         self.assistant = LocalAssistant(str(self.settings.value("model", "qwen3:8b")))
+        self._last_monitor = str(self.settings.value("monitor", "") or "")
         self.voice_worker = None
         self.wake_worker = None
         self.response_worker = None
@@ -497,6 +618,9 @@ class ComputerWindow(QMainWindow):
         self.vault_button = QPushButton("PERSONAL VAULT")
         self.vault_button.clicked.connect(self.open_vault)
         controls.addWidget(self.vault_button)
+        self.preferences_button = QPushButton("PREFERENCES")
+        self.preferences_button.clicked.connect(self.open_preferences)
+        controls.addWidget(self.preferences_button)
         layout.addLayout(controls)
         footer = QLabel("LOCAL-FIRST  •  VOICE INPUT • LOCAL MODEL • SYSTEM SPEECH")
         footer.setObjectName("footer")
@@ -521,6 +645,7 @@ class ComputerWindow(QMainWindow):
         """)
         shell.addWidget(content, 1)
         self.setCentralWidget(root)
+        self.apply_preferences(initial=True)
         self._create_tray()
         self.refresh_runtime_status()
         self.start_runtime_on_launch()
@@ -714,7 +839,12 @@ class ComputerWindow(QMainWindow):
         self.status.setText("SPEAKING")
         self.detail.setText("Response generated locally.")
         self.activity.setValue(100)
-        self.speech_worker = SpeechWorker(answer)
+        self.speech_worker = SpeechWorker(
+            answer,
+            str(self.settings.value("voiceId", "") or ""),
+            int(self.settings.value("voiceRate", 178)),
+            float(self.settings.value("voiceVolume", 1.0)),
+        )
         self.speech_worker.failed.connect(lambda msg: self.detail.setText(msg))
         self.speech_worker.finished.connect(self.speech_finished)
         self.speech_worker.start()
@@ -736,6 +866,31 @@ class ComputerWindow(QMainWindow):
     def hide_after_response(self):
         if self.isVisible() and not (self.voice_worker and self.voice_worker.isRunning()):
             self.hide()
+
+    def apply_preferences(self, initial=False):
+        scale = max(0.70, min(1.50, int(self.settings.value("uiScale", 100)) / 100.0))
+        app = QApplication.instance()
+        if app is not None:
+            font = app.font()
+            font.setPointSizeF(max(8.0, 10.0 * scale))
+            app.setFont(font)
+        target = self.size()
+        if initial or target.width() < 600:
+            self.resize(round(980 * scale), round(600 * scale))
+        else:
+            self.resize(round(980 * scale), round(600 * scale))
+        monitor = str(self.settings.value("monitor", "") or "")
+        if monitor != self._last_monitor:
+            screen = next((s for s in QApplication.screens() if s.name() == monitor), None)
+            if screen is not None:
+                self.move(screen.availableGeometry().center() - self.rect().center())
+            self._last_monitor = monitor
+
+    def open_preferences(self):
+        dialog = SettingsDialog(self)
+        dialog.saved.connect(self.apply_preferences)
+        dialog.exec()
+        self.apply_preferences()
 
     def open_setup(self):
         dialog = SetupDialog(self)
