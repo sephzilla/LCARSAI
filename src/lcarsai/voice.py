@@ -252,7 +252,7 @@ def wait_for_wake_word(stop_event: threading.Event, wake_word: str = "computer")
                         except Exception:
                             heard = ""
                         import re
-                        if re.search(r"\\b" + re.escape(wake_word.lower()) + r"\\b", heard.lower()):
+                        if re.search(r"\b" + re.escape(wake_word.lower()) + r"\b", heard.lower()):
                             return
                         # Keep a 1.2-second overlap to avoid chopping the keyword.
                         buffer = buffer[-int(rate * 1.2):]
