@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
+import subprocess
 from pathlib import Path
 
 
@@ -11,6 +12,10 @@ APP_NAME = "Computer"
 
 
 def _command() -> str:
+    if sys.platform == "win32":
+        if getattr(sys, "frozen", False):
+            return subprocess.list2cmdline([str(Path(sys.executable).resolve())])
+        return subprocess.list2cmdline([sys.executable, "-m", "lcarsai.main"])
     if getattr(sys, "frozen", False):
         return shlex.quote(str(Path(sys.executable).resolve()))
     return shlex.quote(sys.executable) + " -m lcarsai.main"
