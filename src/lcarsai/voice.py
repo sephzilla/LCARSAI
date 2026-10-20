@@ -165,3 +165,86 @@ def speak_local(text: str) -> None:
             "Speech output is unavailable. On Linux, install espeak-ng; on Windows, "
             f"check that a system speech voice is available. Details: {exc}"
         ) from exc
+
+
+def wait_for_wake_word(stop_event: threading.Event, wake_word: str = "computer") -> None:
+    """Listen continuously and return when local Whisper hears the configured wake word.
+
+    This is fully offline after the tiny.en model has been cached. It deliberately uses
+    short overlapping windows so the wake word can straddle a chunk boundary.
+    """
+    import queue
+    import time
+    import numpy as np
+    import sounddevice as sd
+    from faster_whisper import WhisperModel
+
+    try:
+        devices = sd.query_devices()
+    except Exception as exc:
+        raise RuntimeError(f"Cannot enumerate microphone devices for wake-word listening: {exc}") from exc
+
+    try:
+        default_input = int(sd.default.device[0])
+    except Exception:
+        default_input = -1
+    candidates = []
+    if 0 <= default_input < len(devices) and int(devices[default_input]["max_input_channels"]) > 0:
+        candidates.append(default_input)
+    candidates.extend(i for i, d in enumerate(devices)
+                      if int(d["max_input_channels"]) > 0 and i not in candidates)
+    if not candidates:
+        raise RuntimeError("No microphone is available for wake-word listening.")
+
+    model = WhisperModel(
+        os.environ.get("LCARSAI_WAKE_MODEL", "tiny.en"),
+        device="auto",
+        compute_type="int8",
+    )
+    errors = []
+    for device_index in candidates:
+        device = devices[device_index]
+        source_rate = int(float(device["default_samplerate"])) or 48_000
+        rates = list(dict.fromkeys((source_rate, 48_000, 44_100, 32_000, 16_000)))
+        for rate in rates:
+            audio_queue = queue.Queue()
+            def callback(indata, frames, time_info, status):
+                audio_queue.put(indata.copy())
+            try:
+                with sd.InputStream(device=device_index, samplerate=rate, channels=1,
+                                    dtype="float32", callback=callback, blocksize=0):
+                    buffer = np.empty(0, dtype=np.float32)
+                    last_check = 0.0
+                    while not stop_event.is_set():
+                        try:
+                            chunk = audio_queue.get(timeout=0.2).reshape(-1)
+                        except queue.Empty:
+                            continue
+                        buffer = np.concatenate((buffer, chunk))
+                        # Decode a 2.4-second window roughly once per second, with overlap.
+                        if len(buffer) < int(rate * 2.4):
+                            continue
+                        if time.monotonic() - last_check < 0.85:
+                            continue
+                        last_check = time.monotonic()
+                        window = buffer[-int(rate * 3.2):]
+                        samples = _resample_mono(window, rate, SAMPLE_RATE)
+                        try:
+                            segments, _ = model.transcribe(
+                                samples, language="en", beam_size=1, best_of=1,
+                                vad_filter=False, condition_on_previous_text=False,
+                            )
+                            heard = " ".join(segment.text for segment in segments).lower()
+                        except Exception:
+                            heard = ""
+                        if wake_word.lower() in heard.split():
+                            return
+                        # Keep a 1.2-second overlap to avoid chopping the keyword.
+                        buffer = buffer[-int(rate * 1.2):]
+                if stop_event.is_set():
+                    return
+            except Exception as exc:
+                errors.append(f"{device['name']} at {rate} Hz: {exc}")
+                continue
+    if not stop_event.is_set():
+        raise RuntimeError("Wake-word microphone failed: " + " | ".join(errors[:4]))
