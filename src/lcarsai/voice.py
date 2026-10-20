@@ -165,12 +165,27 @@ def transcribe_local(audio) -> str:
     return text
 
 
-def speak_local(text: str) -> None:
+def list_local_voices() -> list[dict]:
+    """List installed system TTS voices."""
+    try:
+        import pyttsx3
+        engine = pyttsx3.init()
+        voices = [{"id": str(v.id), "name": str(v.name)} for v in engine.getProperty("voices")]
+        engine.stop()
+        return voices
+    except Exception:
+        return []
+
+
+def speak_local(text: str, voice_id: str = "", rate: int = 178, volume: float = 1.0) -> None:
     """Speak a response using the operating system's installed speech engine."""
     try:
         import pyttsx3
         engine = pyttsx3.init()
-        engine.setProperty("rate", 178)
+        if voice_id:
+            engine.setProperty("voice", voice_id)
+        engine.setProperty("rate", max(100, min(260, int(rate))))
+        engine.setProperty("volume", max(0.0, min(1.0, float(volume))))
         engine.say(text)
         engine.runAndWait()
         engine.stop()
