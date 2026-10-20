@@ -185,9 +185,59 @@ def start_managed_runtime() -> subprocess.Popen:
     env.setdefault("OLLAMA_KEEP_ALIVE", "5m")
     if sys.platform == "linux":
         env.setdefault("OLLAMA_LIBRARY_PATH", str(runtime_dir() / "lib/ollama"))
-    return subprocess.Popen([str(binary), "serve"], env=env, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                            start_new_session=(sys.platform != "win32"))
+    creationflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    return subprocess.Popen(
+        [str(binary), "serve"],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=(sys.platform != "win32"),
+        creationflags=creationflags,
+    )
+
+
+def stop_managed_runtime(process: subprocess.Popen | None, timeout: float = 3.0) -> None:
+    """Stop only the Ollama process tree started and owned by this Computer session.
+
+    A pre-existing Ollama service is never terminated by this function.
+    """
+    if process is None or process.poll() is not None:
+        return
+
+    try:
+        process.terminate()
+        process.wait(timeout=timeout)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    except OSError:
+        return
+
+    try:
+        if sys.platform == "win32":
+            # Ollama can spawn runner processes; taskkill /T stops the owned process tree.
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=timeout,
+            )
+        else:
+            # start_new_session=True makes the process PID its process-group ID.
+            import signal
+            import os
+
+            os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    finally:
+        try:
+            process.wait(timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def pull_model(model: str, progress: Callable[[str], None] | None = None) -> None:
