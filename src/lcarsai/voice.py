@@ -251,7 +251,8 @@ def wait_for_wake_word(stop_event: threading.Event, wake_word: str = "computer")
                             heard = " ".join(segment.text for segment in segments).lower()
                         except Exception:
                             heard = ""
-                        if wake_word.lower() in heard.split():
+                        import re
+                        if re.search(r"\\b" + re.escape(wake_word.lower()) + r"\\b", heard.lower()):
                             return
                         # Keep a 1.2-second overlap to avoid chopping the keyword.
                         buffer = buffer[-int(rate * 1.2):]
