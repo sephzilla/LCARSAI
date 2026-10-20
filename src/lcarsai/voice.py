@@ -41,7 +41,10 @@ def _resample_mono(audio, source_rate: int, target_rate: int):
     return np.interp(new_positions, old_positions, samples).astype(np.float32)
 
 
-def record_until_stopped(stop_event: threading.Event, max_seconds: int = 45):
+def record_until_stopped(
+    stop_event: threading.Event, max_seconds: int = 45, auto_stop: bool = False,
+    silence_seconds: float = 1.15,
+):
     """Capture audio from the default input or a working alternative until stopped."""
     try:
         import numpy as np
@@ -90,10 +93,21 @@ def record_until_stopped(stop_event: threading.Event, max_seconds: int = 45):
             chunks = []
             done = threading.Event()
             frame_count = [0]
+            speech_state = {"started": False, "silence_frames": 0}
 
             def callback(indata, frames, time_info, status):
                 chunks.append(indata.copy())
                 frame_count[0] += frames
+                if auto_stop:
+                    level = float(np.sqrt(np.mean(np.square(indata))))
+                    if level >= 0.012:
+                        speech_state["started"] = True
+                        speech_state["silence_frames"] = 0
+                    elif speech_state["started"]:
+                        speech_state["silence_frames"] += frames
+                    if speech_state["started"] and speech_state["silence_frames"] >= rate * silence_seconds:
+                        done.set()
+                        raise sd.CallbackStop()
                 if frame_count[0] >= rate * max_seconds:
                     done.set()
                     raise sd.CallbackStop()
