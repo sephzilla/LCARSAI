@@ -101,19 +101,22 @@ def record_until_stopped(
             def callback(indata, frames, time_info, status):
                 chunks.append(indata.copy())
                 frame_count[0] += frames
+                level = float(np.sqrt(np.mean(np.square(indata))))
+                if level_callback is not None:
+                    try:
+                        level_callback(max(0.0, min(1.0, level * 12.0)))
+                    except Exception:
+                        pass
                 if auto_stop:
-                    level = float(np.sqrt(np.mean(np.square(indata))))
-                    if level_callback is not None:
-                        try:
-                            level_callback(max(0.0, min(1.0, level * 12.0)))
-                        except Exception:
-                            pass
                     if level >= 0.012:
                         speech_state["started"] = True
                         speech_state["silence_frames"] = 0
                     elif speech_state["started"]:
                         speech_state["silence_frames"] += frames
                     if speech_state["started"] and speech_state["silence_frames"] >= rate * silence_seconds:
+                        done.set()
+                        raise sd.CallbackStop()
+                    if not speech_state["started"] and frame_count[0] >= rate * 8:
                         done.set()
                         raise sd.CallbackStop()
                 if frame_count[0] >= rate * max_seconds:
