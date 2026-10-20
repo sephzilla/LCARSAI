@@ -199,6 +199,7 @@ class SetupDialog(QDialog):
 
 class VoiceWorker(QThread):
     transcript = Signal(str)
+    level = Signal(float)
     failed = Signal(str)
 
     def __init__(self, auto_stop=False, input_device=-1):
@@ -216,6 +217,7 @@ class VoiceWorker(QThread):
             audio = record_until_stopped(
                 self.stop_event, auto_stop=self.auto_stop,
                 preferred_device=None if self.input_device < 0 else self.input_device,
+                level_callback=self.level.emit,
             )
             self.transcript.emit("Transcribing locally…")
             text = transcribe_local(audio)
@@ -813,6 +815,7 @@ class ComputerWindow(QMainWindow):
             auto_stop=auto_stop, input_device=int(self.settings.value("inputDevice", -1))
         )
         self.voice_worker.transcript.connect(self.voice_progress)
+        self.voice_worker.level.connect(self.update_audio_level)
         self.voice_worker.failed.connect(self.voice_failed)
         self.voice_worker.finished.connect(self.voice_finished)
         self.listen_button.setText("■  STOP LISTENING")
@@ -828,6 +831,19 @@ class ComputerWindow(QMainWindow):
             self.detail.setText("Finishing recording…")
             return
         self.begin_voice_capture(auto_stop=False)
+
+    def update_audio_level(self, level):
+        # A compact LCARS bar graph follows actual microphone energy while recording.
+        base = [0.20, 0.35, 0.55, 0.75, 0.95, 0.75, 0.55, 0.35, 0.20]
+        bars = []
+        for height in base:
+            amount = max(0.08, min(1.0, height * (0.18 + level * 1.8)))
+            bars.append("▁▂▃▄▅▆▇█"[min(7, int(amount * 8))])
+        self.wave.setText("  ".join(bars))
+        self.wave.setStyleSheet(
+            f"color: rgba(204,121,167,{0.55 + min(0.45, level)}); "
+            "background:#20253a; padding:10px; border-radius:20px;"
+        )
 
     def voice_progress(self, text):
         if text.startswith("Listening"):
@@ -888,6 +904,7 @@ class ComputerWindow(QMainWindow):
         QTimer.singleShot(1200, self.start_wake_word_listener)
 
     def speech_finished(self):
+        self.wave.setText("▂  ▄  ▆  █  ▆  ▄  ▂")
         self.status.setText("COMPUTER ONLINE")
         self.detail.setText("Ready for your next request.")
         self.listen_button.setEnabled(True)
