@@ -9,8 +9,9 @@ Computer now opens into a voice-first LCARS desktop panel rather than stopping a
 ### Voice interaction
 
 1. Install/start Ollama and download a model in **LOCAL AI SETUP**.
-2. Press **LISTEN**, speak, then press **STOP LISTENING**.
-3. Computer transcribes locally with faster-whisper, sends the transcript to the local Ollama model, and reads the answer aloud using the operating system speech engine.
+2. Once the local model is ready, say **“Computer”** followed by your request. The app continuously checks short microphone windows using local Whisper tiny.en; after the wake word, it records the request and ends on silence.
+3. Alternatively, press **LISTEN** and then **STOP LISTENING** to use manual recording.
+4. Computer transcribes locally with faster-whisper, sends the transcript to the local Ollama model, and reads the answer aloud using the operating system speech engine.
 4. Say “search the web for …” or “look up online …” to explicitly request web lookup. Ordinary requests do not trigger web lookup.
 
 The Whisper `base` model is downloaded from Hugging Face on first use unless `LCARSAI_WHISPER_MODEL` is set. That first download needs internet; later transcription is local. The Ollama model must already be installed. Speech synthesis uses system voices; on Linux, `espeak-ng` may need to be installed separately.
@@ -30,7 +31,7 @@ The optional vault encrypts note contents using Fernet with a randomly generated
 
 ### Panel behavior
 
-- Borderless draggable LCARS panel.
+- Borderless LCARS panel with segmented LCARS-style side rail, status bands, and amber/purple interface palette.
 - Monitor preference and manually moved panel position are remembered.
 - Tray menu can restore or hide the panel and quit the application.
 - The panel hides seven seconds after speech output completes; restore it from the system tray.
@@ -55,7 +56,6 @@ python -m lcarsai.main
 
 ## Planned / not yet complete
 
-- Always-on wake phrase (“Computer”) detection; current interaction uses on-screen LISTEN/STOP LISTENING controls.
 - Voice enrollment and speaker recognition.
 - Animated audio-reactive LCARS visualization and richer per-screen positioning controls.
 - Secure cross-device vault synchronization and a separate recovery workflow UI.
