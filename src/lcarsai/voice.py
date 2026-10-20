@@ -43,7 +43,7 @@ def _resample_mono(audio, source_rate: int, target_rate: int):
 
 def record_until_stopped(
     stop_event: threading.Event, max_seconds: int = 45, auto_stop: bool = False,
-    silence_seconds: float = 1.15,
+    silence_seconds: float = 1.15, preferred_device: int | None = None,
 ):
     """Capture audio from the default input or a working alternative until stopped."""
     try:
@@ -68,7 +68,9 @@ def record_until_stopped(
         default_input = -1
 
     candidates = []
-    if 0 <= default_input < len(devices) and int(devices[default_input]["max_input_channels"]) > 0:
+    if preferred_device is not None and 0 <= preferred_device < len(devices) and int(devices[preferred_device]["max_input_channels"]) > 0:
+        candidates.append(preferred_device)
+    if 0 <= default_input < len(devices) and int(devices[default_input]["max_input_channels"]) > 0 and default_input not in candidates:
         candidates.append(default_input)
     candidates.extend(
         i for i, device in enumerate(devices)
@@ -196,7 +198,9 @@ def speak_local(text: str, voice_id: str = "", rate: int = 178, volume: float = 
         ) from exc
 
 
-def wait_for_wake_word(stop_event: threading.Event, wake_word: str = "computer") -> None:
+def wait_for_wake_word(
+    stop_event: threading.Event, wake_word: str = "computer", preferred_device: int | None = None
+) -> None:
     """Listen continuously and return when local Whisper hears the configured wake word.
 
     This is fully offline after the tiny.en model has been cached. It deliberately uses
@@ -218,7 +222,9 @@ def wait_for_wake_word(stop_event: threading.Event, wake_word: str = "computer")
     except Exception:
         default_input = -1
     candidates = []
-    if 0 <= default_input < len(devices) and int(devices[default_input]["max_input_channels"]) > 0:
+    if preferred_device is not None and 0 <= preferred_device < len(devices) and int(devices[preferred_device]["max_input_channels"]) > 0:
+        candidates.append(preferred_device)
+    if 0 <= default_input < len(devices) and int(devices[default_input]["max_input_channels"]) > 0 and default_input not in candidates:
         candidates.append(default_input)
     candidates.extend(i for i, d in enumerate(devices)
                       if int(d["max_input_channels"]) > 0 and i not in candidates)
