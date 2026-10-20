@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Computer
+Comment=Local-first voice assistant
+Exec=Computer
+Icon=computer
+Terminal=false
+Categories=Utility;AudioVideo;
+StartupNotify=true
