@@ -44,6 +44,7 @@ def _resample_mono(audio, source_rate: int, target_rate: int):
 def record_until_stopped(
     stop_event: threading.Event, max_seconds: int = 45, auto_stop: bool = False,
     silence_seconds: float = 1.15, preferred_device: int | None = None,
+    level_callback=None,
 ):
     """Capture audio from the default input or a working alternative until stopped."""
     try:
@@ -102,6 +103,11 @@ def record_until_stopped(
                 frame_count[0] += frames
                 if auto_stop:
                     level = float(np.sqrt(np.mean(np.square(indata))))
+                    if level_callback is not None:
+                        try:
+                            level_callback(max(0.0, min(1.0, level * 12.0)))
+                        except Exception:
+                            pass
                     if level >= 0.012:
                         speech_state["started"] = True
                         speech_state["silence_frames"] = 0
