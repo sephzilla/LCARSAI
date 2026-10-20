@@ -60,7 +60,7 @@ jobs:
           python -m pip install pyinstaller
       - name: Build standalone Linux application
         run: |
-          python -m PyInstaller --noconfirm --clean --windowed --name Computer --paths src src/lcarsai/main.py
+          python -m PyInstaller --noconfirm --clean --windowed --hidden-import zstandard --name Computer --paths src src/lcarsai/main.py
       - name: Assemble AppDir
         shell: bash
         run: |
