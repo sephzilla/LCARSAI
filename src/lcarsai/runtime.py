@@ -5,12 +5,15 @@ import json
 import os
 import platform
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
 import urllib.error
 import urllib.request
 import zipfile
+
+import truststore
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -78,23 +81,34 @@ def find_ollama() -> Path | None:
 
 
 def _download(url: str, destination: Path, progress: Callable[[int, int], None] | None = None) -> None:
+    """Download over HTTPS using the operating system's trusted certificate store."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     request = urllib.request.Request(url, headers={"User-Agent": "Computer-LCARS-AI/0.1"})
-    with urllib.request.urlopen(request, timeout=60) as response, destination.open("wb") as out:
-        total = int(response.headers.get("Content-Length", "0"))
-        received = 0
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            out.write(chunk)
-            received += len(chunk)
-            if progress:
-                progress(received, total)
+    try:
+        context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        with urllib.request.urlopen(request, timeout=60, context=context) as response, destination.open("wb") as out:
+            total = int(response.headers.get("Content-Length", "0"))
+            received = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                out.write(chunk)
+                received += len(chunk)
+                if progress:
+                    progress(received, total)
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, (ssl.SSLCertVerificationError, ssl.SSLError)):
+            raise RuntimeError(
+                "Computer could not verify the HTTPS certificate for the official Ollama "
+                "download. Update your operating system's CA certificates and try again. "
+                "TLS certificate verification remains enabled."
+            ) from exc
+        raise RuntimeError(f"Secure runtime download failed: {exc}") from exc
     if destination.stat().st_size == 0:
         destination.unlink(missing_ok=True)
         raise RuntimeError("The runtime download was empty.")
-
 
 def install_runtime(progress: Callable[[int, int], None] | None = None) -> Path:
     """Download official Ollama binaries into Computer's per-user data directory.
