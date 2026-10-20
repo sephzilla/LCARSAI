@@ -198,25 +198,16 @@ def start_managed_runtime() -> subprocess.Popen:
 
 
 def stop_managed_runtime(process: subprocess.Popen | None, timeout: float = 3.0) -> None:
-    """Stop only the Ollama process tree started and owned by this Computer session.
+    """Stop the Ollama process tree owned by this Computer session.
 
-    A pre-existing Ollama service is never terminated by this function.
+    A pre-existing Ollama service is never passed here or terminated.
     """
-    if process is None or process.poll() is not None:
+    if process is None:
         return
 
-    try:
-        process.terminate()
-        process.wait(timeout=timeout)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    except OSError:
-        return
-
-    try:
-        if sys.platform == "win32":
-            # Ollama can spawn runner processes; taskkill /T stops the owned process tree.
+    if sys.platform == "win32":
+        # Ollama may spawn model runner children. Stop the entire tree, not just its parent.
+        try:
             subprocess.run(
                 ["taskkill", "/PID", str(process.pid), "/T", "/F"],
                 stdin=subprocess.DEVNULL,
@@ -225,20 +216,32 @@ def stop_managed_runtime(process: subprocess.Popen | None, timeout: float = 3.0)
                 check=False,
                 timeout=timeout,
             )
-        else:
-            # start_new_session=True makes the process PID its process-group ID.
-            import signal
-            import os
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            except OSError:
+                pass
+    else:
+        # start_new_session=True makes the process PID its process-group ID.
+        import signal
 
-            os.killpg(process.pid, signal.SIGKILL)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    finally:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         try:
             process.wait(timeout=timeout)
         except (OSError, subprocess.TimeoutExpired):
             pass
-
+        # Kill any runner still in the same process group, even if the server exited first.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    try:
+        process.wait(timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
 
 def pull_model(model: str, progress: Callable[[str], None] | None = None) -> None:
     """Pull a model from Ollama's model registry via the local API."""
